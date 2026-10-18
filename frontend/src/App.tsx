@@ -77,6 +77,7 @@ export default function App() {
   const [pathError, setPathError] = useState('')
   const [highlightIds, setHighlightIds] = useState<string[] | null>(null)
   const [pathPulseKey, setPathPulseKey] = useState(0)
+  const pathRequestRef = useRef(0)
 
   const [newTitle, setNewTitle] = useState('')
   const [newContent, setNewContent] = useState('')
@@ -99,6 +100,13 @@ export default function App() {
     importance: selected.importance, tags: selected.tags.join(', '),
   }) : null, [editDraft, selected])
   const pathIds = pathResult?.pathExists ? pathResult.path : null
+  const clearPathVisualization = useCallback(() => {
+    pathRequestRef.current += 1
+    setPathBusy(false)
+    setPathResult(null)
+    setHighlightIds(null)
+    setPathError('')
+  }, [])
 
   const openPalette = useCallback(() => {
     if (paletteOpen) return
@@ -199,21 +207,24 @@ export default function App() {
   }, [query, graphRevision])
 
   const retry = useCallback(() => {
+    clearPathVisualization()
     setStatus('loading'); setError(''); setIntelligenceBusy(true); setSearchBusy(Boolean(query.trim())); setGraphRevision((value) => value + 1)
-  }, [query])
+  }, [clearPathVisualization, query])
   const refreshGraph = useCallback(async () => {
-    setRefreshing(true); setIntelligenceBusy(true); setSearchBusy(Boolean(query.trim())); setPathResult(null); setHighlightIds(null)
+    clearPathVisualization()
+    setRefreshing(true); setIntelligenceBusy(true); setSearchBusy(Boolean(query.trim()))
     setGraphRevision((value) => value + 1)
-  }, [query])
+  }, [clearPathVisualization, query])
   const selectNode = useCallback((note: GraphNote) => {
+    if (note.id !== selectedId) clearPathVisualization()
     setSelectedId(note.id); setHoveredId(null)
-  }, [])
+  }, [clearPathVisualization, selectedId])
   const selectSearchResult = useCallback((note: GraphNote) => {
-    setHighlightIds(null); setPathResult(null); setSelectedId(note.id); setHoveredId(null)
-  }, [])
+    clearPathVisualization(); setSelectedId(note.id); setHoveredId(null)
+  }, [clearPathVisualization])
   const focusStandaloneNote = useCallback((note: GraphNote) => {
-    setHighlightIds(null); setPathResult(null); setSelectedId(note.id); setHoveredId(null)
-  }, [])
+    clearPathVisualization(); setSelectedId(note.id); setHoveredId(null)
+  }, [clearPathVisualization])
   const selectPaletteNote = useCallback((note: GraphNote) => {
     const current = graph?.nodes.find((item) => item.id === note.id)
     if (!current) {
@@ -224,19 +235,25 @@ export default function App() {
     selectSearchResult(current)
   }, [graph, refreshGraph, selectSearchResult])
   const runPath = useCallback(async () => {
+    const requestId = ++pathRequestRef.current
     setPathBusy(true); setPathError(''); setPathResult(null); setHighlightIds(null)
     try {
       const result = await fetchPath(pathFrom, pathTo)
+      if (pathRequestRef.current !== requestId) return
       setPathResult(result); setPathPulseKey((value) => value + 1)
       if (result.pathExists) { setHighlightIds(result.path); setSelectedId(result.path[0] ?? null) }
       else setPathError('No connected path exists between those notes.')
-    } catch (reason) { setPathError(reason instanceof Error ? reason.message : 'Path request failed.') }
-    finally { setPathBusy(false) }
+    } catch (reason) {
+      if (pathRequestRef.current === requestId) setPathError(reason instanceof Error ? reason.message : 'Path request failed.')
+    } finally {
+      if (pathRequestRef.current === requestId) setPathBusy(false)
+    }
   }, [pathFrom, pathTo])
-  const clearExploration = useCallback(() => { setHighlightIds(null); setPathResult(null); setPathError('') }, [])
+  const clearExploration = clearPathVisualization
   const runDfs = useCallback(async () => {
     const start = selectedId ?? graph?.nodes[0]?.id
     if (!start) return
+    clearPathVisualization()
     if (dfsRef.current) dfsRef.current.open = true
     const selectionAtRequest = selectedId
     const revisionAtRequest = graphRevision
@@ -251,7 +268,7 @@ export default function App() {
     } finally {
       if (selectedIdRef.current === selectionAtRequest && graphRevisionRef.current === revisionAtRequest) setDfsRequest(null)
     }
-  }, [graph, graphRevision, selectedId])
+  }, [clearPathVisualization, graph, graphRevision, selectedId])
 
   const mutate = useCallback(async (operation: () => Promise<unknown>, success: string, clearSelection = false, expectation?: MutationExpectation) => {
     setBusy(true); setFeedback(''); setVisualEvent(null)
@@ -259,10 +276,11 @@ export default function App() {
       const operationResult = await operation()
       try {
         const refreshed = await fetchGraph()
+        clearPathVisualization()
         setGraph(refreshed)
         if (clearSelection) setSelectedId(null)
         setGraphRevision((value) => value + 1)
-        setRefreshing(false); setIntelligenceBusy(true); setSearchBusy(Boolean(query.trim())); setPathResult(null); setHighlightIds(null)
+        setRefreshing(false); setIntelligenceBusy(true); setSearchBusy(Boolean(query.trim()))
         const resolvedExpectation = expectation?.kind === 'create' && !expectation.noteId && typeof operationResult === 'object' && operationResult !== null && 'id' in operationResult && typeof operationResult.id === 'string'
           ? { ...expectation, noteId: operationResult.id } : expectation
         const confirmed = resolvedExpectation && (resolvedExpectation.kind === 'create'
@@ -278,7 +296,7 @@ export default function App() {
       }
     } catch (reason) { setFeedback(reason instanceof Error ? reason.message : 'The change could not be saved.') }
     finally { setBusy(false) }
-  }, [query])
+  }, [clearPathVisualization, query])
 
   const submitNote = useCallback((event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -332,7 +350,7 @@ export default function App() {
     { id: 'redo', group: 'Actions', title: 'Redo', detail: history?.nextRedoAction ?? 'Nothing to redo', keywords: 'redo history repeat', disabled: busy || !history?.canRedo, run: () => { void runHistory('redo') } },
   ], [busy, clearExploration, focusSection, focusStandaloneNote, graph?.nodes.length, history?.canRedo, history?.canUndo, history?.nextRedoAction, history?.nextUndoAction, runDfs, runHistory, selected])
 
-  const onChooseGroup = (ids: string[]) => { setPathResult(null); setHighlightIds(ids); setSelectedId(null) }
+  const onChooseGroup = (ids: string[]) => { clearPathVisualization(); setHighlightIds(ids); setSelectedId(null) }
   const noteName = (id: string) => graph?.nodes.find((note) => note.id === id)?.title ?? id
   const visibleRelationship = useMemo(() => graph?.edges.filter((edge) => edge.sourceNoteId === selectedId || edge.targetNoteId === selectedId) ?? [], [graph, selectedId])
   const directNeighborIds = useMemo(() => new Set(visibleRelationship.map((edge) => edge.sourceNoteId === selectedId ? edge.targetNoteId : edge.sourceNoteId)), [selectedId, visibleRelationship])

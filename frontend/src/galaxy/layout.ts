@@ -11,17 +11,29 @@ function hash(value: string): number {
   return result >>> 0
 }
 
-/** Stable golden-angle spiral layout for presentation only; graph data remains backend-owned. */
+/** Stable, gently warped 3D spiral for presentation only; graph data remains backend-owned. */
 export function createGalaxyLayout(notes: GraphNote[]): Map<string, Point3> {
   const ordered = [...notes].sort((a, b) => a.id.localeCompare(b.id))
   const result = new Map<string, Point3>()
+  const spacingScale = 1.15
   const goldenAngle = Math.PI * (3 - Math.sqrt(5))
   ordered.forEach((note, index) => {
     const seed = hash(note.id)
     const angle = index * goldenAngle + (seed % 1000) / 1000 * 0.18
-    const radius = 2.3 + Math.sqrt(index) * 1.12
-    const y = (((seed >>> 10) % 1000) / 1000 - 0.5) * Math.min(5.6, 1.5 + Math.sqrt(index) * 0.34)
-    result.set(note.id, [Math.cos(angle) * radius, y, Math.sin(angle) * radius])
+    const radiusVariation = 0.9 + ((seed >>> 20) % 1000) / 5000
+    const radius = (2.3 + Math.sqrt(index) * 1.08) * radiusVariation
+    const verticalExtent = Math.min(8.4, 4.6 + Math.sqrt(index) * 0.82)
+    const y = (((seed >>> 10) % 1000) / 1000 - 0.5) * verticalExtent
+    const lateralDrift = ((((seed >>> 5) % 1000) / 1000) - 0.5) * 0.72
+    // Give depth its own seeded coordinate instead of deriving it only from the
+    // spiral angle. This keeps the front view legible while side views reveal a
+    // bounded, irregular cloud rather than a thin spiral sheet.
+    const depthDrift = (((seed >>> 16) % 1000) / 1000 - 0.5) * 6.4
+    result.set(note.id, [
+      (Math.cos(angle) * radius + Math.cos(angle + Math.PI / 2) * lateralDrift) * spacingScale,
+      y * spacingScale,
+      (Math.sin(angle) * radius + Math.sin(angle + Math.PI / 2) * lateralDrift + depthDrift) * spacingScale,
+    ])
   })
   return result
 }
@@ -43,7 +55,7 @@ export function nodeRadius(importance: number): number {
 
 export function nodeColor(type: string): string {
   const colors: Record<string, string> = {
-    CONCEPT: '#b5c2ca', RESOURCE: '#d3b77e', QUESTION: '#bb8276', SUMMARY: '#d2d0c4',
+    CONCEPT: '#a9c2d0', RESOURCE: '#d9ae62', QUESTION: '#cf8170', SUMMARY: '#d9d8cc',
   }
   return colors[type.toUpperCase()] ?? '#a8b0b5'
 }

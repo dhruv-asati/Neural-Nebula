@@ -2,13 +2,13 @@ import type { GraphNote } from '../types'
 
 const typeLabels: Record<string, string> = { CONCEPT: 'Concept', RESOURCE: 'Resource', QUESTION: 'Question', SUMMARY: 'Summary' }
 
-export function Hud({ count, status, selected, onDeselect }: {
-  count: number; status: 'loading' | 'ready' | 'error'; selected: GraphNote | null; onDeselect: () => void
+export function Hud({ count, status, selected, onDeselect, onHome }: {
+  count: number; status: 'loading' | 'ready' | 'error'; selected: GraphNote | null; onDeselect: () => void; onHome: () => void
 }) {
   const statusText = { loading: 'Establishing signal', ready: 'Galaxy online', error: 'Signal unavailable' }[status]
   return <>
     <header className="masthead">
-      <a className="brand" href="#home" aria-label="Neural Nebula home" onClick={(event) => { event.preventDefault(); onDeselect() }}>
+      <a className="brand" href="/" aria-label="Neural Nebula home" onClick={(event) => { event.preventDefault(); onHome() }}>
         <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
         <span><strong>NEURAL NEBULA</strong><small>KNOWLEDGE ORBITAL</small></span>
       </a>

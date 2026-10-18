@@ -17,11 +17,12 @@ import './ArtDirection.css'
 
 type LoadStatus = 'loading' | 'ready' | 'error'
 const GalaxyCanvas = lazy(() => import('./components/GalaxyCanvas').then((module) => ({ default: module.GalaxyCanvas })))
+const LandingPage = lazy(() => import('./components/LandingPage').then((module) => ({ default: module.LandingPage })))
 
 type VisualEvent = { key: number; kind: 'create' | 'delete' | 'relationship'; noteId?: string; sourceId?: string; targetId?: string; position?: [number, number, number] }
 type MutationExpectation = Omit<VisualEvent, 'key'>
 
-export default function App() {
+function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering: boolean }) {
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null)
   const [status, setStatus] = useState<LoadStatus>('loading')
   const [error, setError] = useState('')
@@ -366,7 +367,7 @@ export default function App() {
     void mutate(() => createRelationship(selectedId, targetId), 'Suggested relationship created.', false, { kind: 'relationship', sourceId: selectedId, targetId })
   }, [directNeighborIds, mutate, selectedId])
 
-  return <main className="app-shell">
+  return <main className={`app-shell${entering ? ' app-shell--route-enter' : ''}`}>
     <div className="scene-wash" aria-hidden="true" />
     {graph && graph.nodes.length > 0 && <div className="canvas-wrap" aria-label="Interactive 3D knowledge galaxy">
       <Suspense fallback={<div className="canvas-loading" role="status">Initializing the 3D galaxy…</div>}>
@@ -376,7 +377,7 @@ export default function App() {
           onSelect={selectNode} onHover={setHoveredId} />
       </Suspense>
     </div>}
-    <Hud count={graph?.nodes.length ?? 0} status={status} selected={selected} onDeselect={() => setSelectedId(null)} />
+    <Hud count={graph?.nodes.length ?? 0} status={status} selected={selected} onDeselect={() => setSelectedId(null)} onHome={onHome} />
     {paletteOpen && <CommandPalette actions={paletteActions} selected={selected} onSelectNote={selectPaletteNote} onClose={closePalette} />}
 
     <aside className="explorer-panel" aria-label="Knowledge exploration controls">
@@ -418,9 +419,12 @@ export default function App() {
               const note = graph?.nodes.find((item) => item.id === noteId)
               if (!note) return null
               const connected = directNeighborIds.has(noteId)
+              const relationship = connected ? graph?.edges.find((edge) =>
+                (edge.sourceNoteId === selected.id && edge.targetNoteId === noteId) ||
+                (edge.sourceNoteId === noteId && edge.targetNoteId === selected.id)) : undefined
               return <div className="discovery-row" key={noteId}>
                 <button className="console-row discovery-note" onClick={() => focusStandaloneNote(note)}><span>{note.title}<small>{note.type}{note.tags.length ? ' · ' + note.tags.join(', ') : ''}</small></span><small>{(similarity * 100).toFixed(0)}% · {connected ? 'Connected' : 'Suggested'}</small></button>
-                {connected ? <small className="relationship-status">Existing relationship · similarity suggestion</small> : <button className="connect-suggestion" disabled={busy} onClick={() => connectSuggestion(noteId)}>Connect</button>}
+                {connected ? <div className="relationship-actions"><small className="relationship-status">Existing relationship</small>{relationship && <button className="relationship-remove" disabled={busy} aria-label={`Remove relationship between ${selected.title} and ${note.title}`} onClick={() => void mutate(() => deleteRelationshipRequest(relationship.id), 'Relationship removed.')}>Remove link</button>}</div> : <button className="connect-suggestion" disabled={busy} onClick={() => connectSuggestion(noteId)}>Connect</button>}
               </div>
             })}</div>}
           </>}
@@ -516,3 +520,42 @@ function GroupList({ title, groups, noteName, onChoose, onSelectNote }: {
 function Metric({ label, value }: { label: string; value: string }) { return <><dt>{label}</dt><dd>{value}</dd></> }
 
 function NoteTypes() { return <><option value="CONCEPT">Concept</option><option value="RESOURCE">Resource</option><option value="QUESTION">Question</option><option value="SUMMARY">Summary</option></> }
+
+type AppPath = '/' | '/explore'
+
+function resolvePath(pathname: string): AppPath {
+  return pathname.replace(/\/+$/, '') === '/explore' ? '/explore' : '/'
+}
+
+export default function App() {
+  const [path, setPath] = useState<AppPath>(() => resolvePath(window.location.pathname))
+  const [explorerEntering, setExplorerEntering] = useState(false)
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setPath(resolvePath(window.location.pathname))
+      setExplorerEntering(false)
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  const enterExplorer = useCallback(() => {
+    if (resolvePath(window.location.pathname) === '/explore') {
+      setExplorerEntering(true)
+      setPath('/explore')
+      return
+    }
+    window.history.pushState({}, '', '/explore')
+    setExplorerEntering(true)
+    setPath('/explore')
+  }, [])
+
+  const returnHome = useCallback(() => {
+    if (resolvePath(window.location.pathname) !== '/') window.history.pushState({}, '', '/')
+    setExplorerEntering(false)
+    setPath('/')
+  }, [])
+
+  return path === '/explore' ? <GalaxyExplorerApp onHome={returnHome} entering={explorerEntering} /> : <Suspense fallback={<main className="landing-loading" role="status" aria-label="Preparing the cosmic scene" />}><LandingPage onEnter={enterExplorer} /></Suspense>
+}

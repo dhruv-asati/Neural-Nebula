@@ -1,3 +1,7 @@
+.app-shell--route-enter { animation: explorer-route-enter 780ms cubic-bezier(.2,.72,.2,1) both; }
+@keyframes explorer-route-enter { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .app-shell--route-enter { animation: none; } }
+
 .explorer-panel { position: absolute; z-index: 5; top: 112px; bottom: 68px; left: clamp(16px, 3vw, 46px); width: min(335px, calc(100vw - 32px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid rgba(184,169,235,.19); background: linear-gradient(150deg, rgba(13,12,25,.91), rgba(8,8,17,.82)); box-shadow: 0 16px 55px #0007; backdrop-filter: blur(15px); }
 .explorer-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 15px 15px 11px; border-bottom: 1px solid #ffffff12; }
 .explorer-heading h2 { margin: 4px 0 0; color: #eee9ff; font: 500 17px 'Playfair Display', Georgia, serif; }
@@ -27,12 +31,16 @@
 .console-message { padding: 6px 14px; border-bottom: 1px solid #ffffff10; color: #b8a6ee; font-size: 9px; }
 .console-retry { align-self: flex-start; margin: 7px 14px 1px; border: 1px solid #aa91eb48; padding: 6px 8px; color: #d7c8fb; background: #a78aff12; font-size: 9px; cursor: pointer; }
 .console-list { display: grid; gap: 4px; margin-top: 7px; }
+.landing-loading { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; background: #020406; color: #89867d; font: 9px 'DM Mono', monospace; letter-spacing: .14em; }
 .discovery-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px; border-bottom: 1px solid #ffffff0b; padding-bottom: 4px; }
 .discovery-note { min-width: 0; }
 .discovery-note > span { min-width: 0; overflow-wrap: anywhere; }
 .discovery-note > span small { display: block; margin-top: 3px; color: #9290a4; font-size: 8px; line-height: 1.4; }
 .discovery-row > .console-row > small { color: #d2b878; }
-.relationship-status { grid-column: 1 / -1; padding-left: 7px; color: #8f9b94; font-size: 8px; }
+.relationship-actions { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-left: 7px; }
+.relationship-status { color: #8f9b94; font-size: 8px; }
+.relationship-remove { border: 1px solid #df9c7b38; padding: 4px 6px; color: #e0ae8f !important; background: #df9c7b0c; font-size: 8px !important; }
+.relationship-remove:hover:not(:disabled) { background: #df9c7b1e; }
 .connect-suggestion { border: 1px solid #d2b87838; padding: 5px 7px; color: #d8bd7f !important; background: #d2b8780c; font-size: 8px !important; }
 .connect-suggestion:hover:not(:disabled) { background: #d2b87820; }
 .console-row { display: flex; width: 100%; justify-content: space-between; gap: 8px; align-items: center; border: 1px solid transparent; padding: 6px 7px; color: #d8d3e7 !important; background: #ffffff06; text-align: left; }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, type MutableRefObject } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { Billboard, OrbitControls, Text } from '@react-three/drei'
 import * as THREE from 'three'
@@ -65,9 +65,24 @@ function compactNodeTitle(title: string) {
 }
 
 type FloatingTextMesh = THREE.Mesh & { fillOpacity: number; outlineOpacity: number }
+type NodeRevealTimeline = { startedAt: number }
 
-function NodeLabel({ title, offset, hovered, selected, onPath }: {
+const NODE_REVEAL_DELAY_MS = 180
+const NODE_REVEAL_DURATION_MS = 760
+const NODE_REVEAL_STAGGER_MS = 3.5
+
+function getNodeRevealOpacity(timeline: NodeRevealTimeline, index: number, now: number) {
+  const progress = THREE.MathUtils.clamp(
+    (now - timeline.startedAt - index * NODE_REVEAL_STAGGER_MS) / NODE_REVEAL_DURATION_MS,
+    0,
+    1,
+  )
+  return progress * progress * (3 - 2 * progress)
+}
+
+function NodeLabel({ title, offset, hovered, selected, onPath, revealOpacity }: {
   title: string; offset: number; hovered: boolean; selected: boolean; onPath: boolean
+  revealOpacity: MutableRefObject<number>
 }) {
   const label = useRef<FloatingTextMesh>(null)
   const worldPosition = useRef(new THREE.Vector3())
@@ -83,8 +98,8 @@ function NodeLabel({ title, offset, hovered, selected, onPath }: {
     const targetOpacity = (0.3 + emphasis * 0.68) * visibility
     const targetOutline = (0.11 + emphasis * 0.3) * visibility
     const targetScale = 1 + emphasis * 0.08
-    text.fillOpacity = THREE.MathUtils.damp(text.fillOpacity, targetOpacity, 8, delta)
-    text.outlineOpacity = THREE.MathUtils.damp(text.outlineOpacity, targetOutline, 8, delta)
+    text.fillOpacity = THREE.MathUtils.damp(text.fillOpacity, targetOpacity, 8, delta) * revealOpacity.current
+    text.outlineOpacity = THREE.MathUtils.damp(text.outlineOpacity, targetOutline, 8, delta) * revealOpacity.current
     text.scale.setScalar(THREE.MathUtils.damp(text.scale.x, targetScale, 8, delta))
   })
 
@@ -98,11 +113,11 @@ function NodeLabel({ title, offset, hovered, selected, onPath }: {
       textAlign="center"
       whiteSpace="nowrap"
       maxWidth={3.2}
-      fillOpacity={0.3}
+      fillOpacity={0}
       outlineWidth={0.018}
       outlineBlur={0.012}
       outlineColor="#d6b875"
-      outlineOpacity={0.11}
+      outlineOpacity={0}
       depthOffset={-1}
       raycast={() => null}
     >
@@ -111,15 +126,18 @@ function NodeLabel({ title, offset, hovered, selected, onPath }: {
   </Billboard>
 }
 
-function NoteNode({ note, position, active, dimmed, hovered, selected, prominent, onPath, haloTexture, arrivalUntil, onSelect, onHover }: {
+function NoteNode({ note, position, active, dimmed, hovered, selected, prominent, onPath, haloTexture, arrivalUntil, revealTimeline, revealIndex, onSelect, onHover }: {
   note: GraphNote; position: [number, number, number]; active: boolean; dimmed: boolean
   hovered: boolean; selected: boolean; prominent: boolean; onPath: boolean; haloTexture: THREE.Texture
-  arrivalUntil: Map<string, number>
+  arrivalUntil: Map<string, number>; revealTimeline: MutableRefObject<NodeRevealTimeline>; revealIndex: number
   onSelect: () => void; onHover: (id: string | null) => void
 }) {
   const group = useRef<THREE.Group>(null)
   const coreMaterial = useRef<THREE.MeshStandardMaterial>(null)
   const haloMaterial = useRef<THREE.SpriteMaterial>(null)
+  const surfaceMaterial = useRef<THREE.MeshBasicMaterial>(null)
+  const coronaMaterial = useRef<THREE.MeshBasicMaterial>(null)
+  const revealOpacity = useRef(0)
   const reducedMotion = useRef(false)
   const seed = hashText(note.id)
   const phase = ((seed >>> 8) % 1000) / 1000 * Math.PI * 2
@@ -141,22 +159,25 @@ function NoteNode({ note, position, active, dimmed, hovered, selected, prominent
 
   useFrame((state, delta) => {
     if (!group.current) return
+    revealOpacity.current = reducedMotion.current ? 1 : getNodeRevealOpacity(revealTimeline.current, revealIndex, performance.now())
     const target = selected ? 1.2 : active ? 1.12 : 1
     const breath = reducedMotion.current ? 1 : 0.97 + Math.sin(state.clock.elapsedTime * 1.15 + phase) * 0.025
     group.current.scale.setScalar(THREE.MathUtils.damp(group.current.scale.x, target * breath, 7, delta))
     if (coreMaterial.current) {
       const shimmer = reducedMotion.current ? 0 : Math.sin(state.clock.elapsedTime * 1.35 + phase) * 0.035
-      coreMaterial.current.opacity = (dimmed ? 0.48 : 0.98) + shimmer
+      coreMaterial.current.opacity = ((dimmed ? 0.48 : 0.98) + shimmer) * revealOpacity.current
       const baseEmission = dimmed ? 0.12 : selected ? 0.72 : prominent ? 0.34 : active ? 0.3 : 0.2
       const brightnessVariation = 0.9 + ((seed >>> 20) % 201) / 1000
       const arrivalProgress = THREE.MathUtils.clamp(((arrivalUntil.get(note.id) ?? 0) - state.clock.elapsedTime) / 0.28, 0, 1)
       const arrivalResponse = arrivalProgress * arrivalProgress * (3 - 2 * arrivalProgress)
-      coreMaterial.current.emissiveIntensity = baseEmission * brightnessVariation + shimmer * 2 + arrivalResponse * 0.26
+      coreMaterial.current.emissiveIntensity = (baseEmission * brightnessVariation + shimmer * 2 + arrivalResponse * 0.26) * revealOpacity.current
     }
     if (haloMaterial.current) {
       const shimmer = reducedMotion.current ? 0 : Math.sin(state.clock.elapsedTime * 0.9 + phase) * 0.018
-      haloMaterial.current.opacity = (dimmed ? 0.025 : selected ? 0.24 : prominent ? 0.15 : 0.1) + shimmer
+      haloMaterial.current.opacity = ((dimmed ? 0.025 : selected ? 0.24 : prominent ? 0.15 : 0.1) + shimmer) * revealOpacity.current
     }
+    if (surfaceMaterial.current) surfaceMaterial.current.opacity = (selected ? 0.96 : prominent ? 0.88 : 0.78) * revealOpacity.current
+    if (coronaMaterial.current) coronaMaterial.current.opacity = (dimmed ? 0.06 : prominent ? 0.2 : 0.15) * revealOpacity.current
   })
   return (
     <group ref={group} position={position}>
@@ -170,28 +191,30 @@ function NoteNode({ note, position, active, dimmed, hovered, selected, prominent
         <meshBasicMaterial transparent opacity={0} colorWrite={false} depthWrite={false} />
       </mesh>
       <sprite scale={[radius * (selected ? 4.4 : prominent ? 3.8 : 3.5), radius * (selected ? 4.4 : prominent ? 3.8 : 3.5), 1]} raycast={() => null}>
-        <spriteMaterial ref={haloMaterial} map={haloTexture} color={typeTint} transparent opacity={0.2} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+        <spriteMaterial ref={haloMaterial} map={haloTexture} color={typeTint} transparent opacity={0} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
       </sprite>
       <mesh scale={selectedRadius} raycast={() => null}>
         <primitive object={nodeSphereGeometry} attach="geometry" />
-        <meshStandardMaterial ref={coreMaterial} color={coreColor} emissive={coreColor} emissiveIntensity={0.2} roughness={0.34} metalness={0.08} transparent opacity={0.98} depthWrite={false} />
+        <meshStandardMaterial ref={coreMaterial} color={coreColor} emissive={coreColor} emissiveIntensity={0} roughness={0.34} metalness={0.08} transparent opacity={0} depthWrite={false} />
       </mesh>
       <mesh scale={selectedRadius * 0.3} raycast={() => null}>
         <primitive object={nodeSphereGeometry} attach="geometry" />
-        <meshBasicMaterial color={selected ? '#fff8e9' : '#fff3d7'} transparent opacity={selected ? 0.96 : prominent ? 0.88 : 0.78} depthWrite={false} toneMapped={false} />
+        <meshBasicMaterial ref={surfaceMaterial} color={selected ? '#fff8e9' : '#fff3d7'} transparent opacity={0} depthWrite={false} toneMapped={false} />
       </mesh>
       {(prominent || active) && !selected && <mesh scale={radius * 1.48} rotation={[Math.PI / 2.25, 0, 0]} raycast={() => null}>
         <primitive object={nodeCoronaGeometry} attach="geometry" />
-        <meshBasicMaterial color={prominent ? '#e7c483' : typeTint} transparent opacity={dimmed ? 0.06 : prominent ? 0.2 : 0.15} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+        <meshBasicMaterial ref={coronaMaterial} color={prominent ? '#e7c483' : typeTint} transparent opacity={0} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
       </mesh>}
-      {selected && <NodeCorona radius={selectedRadius} seed={note.id} />}
-      <NodeLabel title={note.title} offset={radius * (selected ? 2.7 : 2.4) + 0.08} hovered={hovered} selected={selected} onPath={onPath} />
+      {selected && <NodeCorona radius={selectedRadius} seed={note.id} revealOpacity={revealOpacity} />}
+      <NodeLabel title={note.title} offset={radius * (selected ? 2.7 : 2.4) + 0.08} hovered={hovered} selected={selected} onPath={onPath} revealOpacity={revealOpacity} />
     </group>
   )
 }
 
-function NodeCorona({ radius, seed }: { radius: number; seed: string }) {
+function NodeCorona({ radius, seed, revealOpacity }: { radius: number; seed: string; revealOpacity: MutableRefObject<number> }) {
   const electrons = useRef<Array<THREE.Mesh | null>>([])
+  const orbitLineMaterials = useRef<Array<THREE.LineBasicMaterial | null>>([])
+  const electronMaterials = useRef<Array<THREE.MeshBasicMaterial | null>>([])
   const reducedMotion = useRef(false)
   const orbits = useMemo(() => {
     const random = createRandom(hashText(seed))
@@ -234,6 +257,9 @@ function NodeCorona({ radius, seed }: { radius: number; seed: string }) {
     for (let index = 0; index < orbits.length; index += 1) {
       const orbit = orbits[index]
       const electron = electrons.current[index]
+      const reveal = revealOpacity.current
+      if (orbitLineMaterials.current[index]) orbitLineMaterials.current[index]!.opacity = 0.18 * reveal
+      if (electronMaterials.current[index]) electronMaterials.current[index]!.opacity = 0.82 * reveal
       if (!electron) continue
       const angle = orbit.phase + elapsed * orbit.speed * orbit.direction
       const x = Math.cos(angle) * orbit.rx
@@ -249,11 +275,11 @@ function NodeCorona({ radius, seed }: { radius: number; seed: string }) {
   return <group raycast={() => null}>
     {orbits.map((orbit, index) => <group key={index} raycast={() => null}>
       <lineLoop geometry={orbit.geometry} raycast={() => null}>
-        <lineBasicMaterial color={orbit.color} transparent opacity={0.18} depthWrite={false} toneMapped={false} />
+        <lineBasicMaterial ref={(material) => { orbitLineMaterials.current[index] = material }} color={orbit.color} transparent opacity={0} depthWrite={false} toneMapped={false} />
       </lineLoop>
       <mesh ref={(mesh) => { electrons.current[index] = mesh }} scale={radius * 0.075} raycast={() => null}>
         <primitive object={nodeSphereGeometry} attach="geometry" />
-        <meshBasicMaterial color={orbit.color} transparent opacity={0.82} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+        <meshBasicMaterial ref={(material) => { electronMaterials.current[index] = material }} color={orbit.color} transparent opacity={0} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
       </mesh>
     </group>)}
   </group>
@@ -1234,6 +1260,11 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
 function Scene({ notes, edges, selectedId, hoveredId, highlightIds, pathIds, pathPulseKey, visualEvent, onVisualEventComplete, onSelect, onHover }: GalaxyCanvasProps) {
   const positions = useMemo(() => createGalaxyLayout(notes), [notes])
   const arrivalUntil = useMemo(() => new Map<string, number>(), [])
+  const revealTimeline = useRef<NodeRevealTimeline>({ startedAt: 0 })
+  const revealOrder = useMemo(() => new Map([...notes].sort((first, second) => first.id.localeCompare(second.id)).map((note, index) => [note.id, index])), [notes])
+  useEffect(() => {
+    revealTimeline.current.startedAt = performance.now() + NODE_REVEAL_DELAY_MS
+  }, [notes])
   const neighbors = useMemo(() => createNeighborMap(notes, edges), [notes, edges])
   const nodeHaloTexture = useMemo(() => createNodeHaloTexture(), [])
   useEffect(() => () => nodeHaloTexture.dispose(), [nodeHaloTexture])
@@ -1298,7 +1329,7 @@ function Scene({ notes, edges, selectedId, hoveredId, highlightIds, pathIds, pat
       const focused = filterSet ?? emphasized
       const active = Boolean(focused?.has(note.id))
       const prominent = note.importance >= 92 || (neighbors.get(note.id)?.size ?? 0) >= 5
-      return <NoteNode key={note.id} note={note} position={position} active={active} dimmed={Boolean(focused && !active)} hovered={note.id === hoveredId} selected={note.id === selectedId} prominent={prominent} onPath={Boolean(pathSet?.has(note.id))} haloTexture={nodeHaloTexture} arrivalUntil={arrivalUntil} onSelect={() => onSelect(note)} onHover={onHover} />
+      return <NoteNode key={note.id} note={note} position={position} active={active} dimmed={Boolean(focused && !active)} hovered={note.id === hoveredId} selected={note.id === selectedId} prominent={prominent} onPath={Boolean(pathSet?.has(note.id))} haloTexture={nodeHaloTexture} arrivalUntil={arrivalUntil} revealTimeline={revealTimeline} revealIndex={revealOrder.get(note.id) ?? 0} onSelect={() => onSelect(note)} onHover={onHover} />
     })}
     {visualEvent && mutationPosition && mutationEdgeExists && (visualEvent.kind !== 'relationship' || mutationTarget) && <GraphMutationEffect
       key={visualEvent.key} event={visualEvent} position={mutationPosition} target={mutationTarget}

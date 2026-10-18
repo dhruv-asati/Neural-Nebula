@@ -17,15 +17,17 @@ import './ArtDirection.css'
 
 type LoadStatus = 'loading' | 'ready' | 'error'
 const GalaxyCanvas = lazy(() => import('./components/GalaxyCanvas').then((module) => ({ default: module.GalaxyCanvas })))
+const LandingPage = lazy(() => import('./components/LandingPage').then((module) => ({ default: module.LandingPage })))
 
 type VisualEvent = { key: number; kind: 'create' | 'delete' | 'relationship'; noteId?: string; sourceId?: string; targetId?: string; position?: [number, number, number] }
 type MutationExpectation = Omit<VisualEvent, 'key'>
 
-export default function App() {
+function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering: boolean }) {
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null)
   const [status, setStatus] = useState<LoadStatus>('loading')
   const [error, setError] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [controlPanelOpen, setControlPanelOpen] = useState(false)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [graphRevision, setGraphRevision] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
@@ -366,7 +368,7 @@ export default function App() {
     void mutate(() => createRelationship(selectedId, targetId), 'Suggested relationship created.', false, { kind: 'relationship', sourceId: selectedId, targetId })
   }, [directNeighborIds, mutate, selectedId])
 
-  return <main className="app-shell">
+  return <main className={`app-shell${entering ? ' app-shell--route-enter' : ''}`}>
     <div className="scene-wash" aria-hidden="true" />
     {graph && graph.nodes.length > 0 && <div className="canvas-wrap" aria-label="Interactive 3D knowledge galaxy">
       <Suspense fallback={<div className="canvas-loading" role="status">Initializing the 3D galaxy…</div>}>
@@ -376,10 +378,33 @@ export default function App() {
           onSelect={selectNode} onHover={setHoveredId} />
       </Suspense>
     </div>}
-    <Hud count={graph?.nodes.length ?? 0} status={status} selected={selected} onDeselect={() => setSelectedId(null)} />
+    <Hud count={graph?.nodes.length ?? 0} status={status} selected={selected} onDeselect={() => setSelectedId(null)} onHome={onHome} />
     {paletteOpen && <CommandPalette actions={paletteActions} selected={selected} onSelectNote={selectPaletteNote} onClose={closePalette} />}
 
-    <aside className="explorer-panel" aria-label="Knowledge exploration controls">
+    <button
+      className={`panel-toggle${controlPanelOpen ? ' panel-toggle--open' : ''}`}
+      type="button"
+      aria-label={controlPanelOpen ? 'Close control panel' : 'Open control panel'}
+      aria-controls="knowledge-explorer-panel"
+      aria-expanded={controlPanelOpen}
+      title={controlPanelOpen ? 'Close control panel' : 'Open control panel'}
+      onClick={() => setControlPanelOpen((open) => !open)}
+    >
+      <svg viewBox="0 0 36 36" aria-hidden="true">
+        <rect x="5.5" y="9" width="18" height="21" rx="2.2" className="panel-toggle__panel-back" />
+        <rect x="10.5" y="6" width="19" height="23" rx="2.4" className="panel-toggle__panel-front" />
+        <path d="M15 13h10M15 17.5h10M15 22h6" className="panel-toggle__lines" />
+        <path d="m28.2 3.8.95 2.7 2.7.95-2.7.95-.95 2.7-.95-2.7-2.7-.95 2.7-.95z" className="panel-toggle__spark" />
+      </svg>
+    </button>
+
+    <aside
+      id="knowledge-explorer-panel"
+      className={`explorer-panel${controlPanelOpen ? ' panel-open' : ' panel-closed'}`}
+      aria-label="Knowledge exploration controls"
+      aria-hidden={!controlPanelOpen}
+      inert={!controlPanelOpen}
+    >
       <div className="explorer-heading"><div><span className="panel-kicker">INTELLIGENCE CONSOLE</span><h2>Explore the graph</h2></div>
         <div className="header-actions"><button className="palette-trigger" onClick={openPalette} aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K">⌕ Search <kbd>{shortcutLabel}</kbd></button>
           <div className="history-controls" aria-label="Undo and redo"><button disabled={busy || !history?.canUndo} title={history?.nextUndoAction ?? 'Nothing to undo'} onClick={() => void runHistory('undo')}>↶ Undo</button><button disabled={busy || !history?.canRedo} title={history?.nextRedoAction ?? 'Nothing to redo'} onClick={() => void runHistory('redo')}>Redo ↷</button></div></div>
@@ -418,9 +443,12 @@ export default function App() {
               const note = graph?.nodes.find((item) => item.id === noteId)
               if (!note) return null
               const connected = directNeighborIds.has(noteId)
+              const relationship = connected ? graph?.edges.find((edge) =>
+                (edge.sourceNoteId === selected.id && edge.targetNoteId === noteId) ||
+                (edge.sourceNoteId === noteId && edge.targetNoteId === selected.id)) : undefined
               return <div className="discovery-row" key={noteId}>
                 <button className="console-row discovery-note" onClick={() => focusStandaloneNote(note)}><span>{note.title}<small>{note.type}{note.tags.length ? ' · ' + note.tags.join(', ') : ''}</small></span><small>{(similarity * 100).toFixed(0)}% · {connected ? 'Connected' : 'Suggested'}</small></button>
-                {connected ? <small className="relationship-status">Existing relationship · similarity suggestion</small> : <button className="connect-suggestion" disabled={busy} onClick={() => connectSuggestion(noteId)}>Connect</button>}
+                {connected ? <div className="relationship-actions"><small className="relationship-status">Existing relationship</small>{relationship && <button className="relationship-remove" disabled={busy} aria-label={`Remove relationship between ${selected.title} and ${note.title}`} onClick={() => void mutate(() => deleteRelationshipRequest(relationship.id), 'Relationship removed.')}>Remove link</button>}</div> : <button className="connect-suggestion" disabled={busy} onClick={() => connectSuggestion(noteId)}>Connect</button>}
               </div>
             })}</div>}
           </>}
@@ -466,7 +494,10 @@ export default function App() {
               }
             }}>Delete selected note</button>
               <h4>Ordinary relationships</h4><label>Connect to<select id="relationship-target" value={relationshipTarget} onChange={(event) => setRelationshipTarget(event.target.value)}><option value="">Choose a note</option>{graph?.nodes.filter((note) => note.id !== selected.id && !visibleRelationship.some((edge) => edge.sourceNoteId === note.id || edge.targetNoteId === note.id)).map((note) => <option key={note.id} value={note.id}>{note.title}</option>)}</select></label><button disabled={busy || !relationshipTarget} onClick={() => void mutate(() => createRelationship(selected.id, relationshipTarget), 'Relationship created.', false, { kind: 'relationship', sourceId: selected.id, targetId: relationshipTarget })}>Add related link</button>
-              {visibleRelationship.length > 0 && <div className="console-list">{visibleRelationship.map((edge) => <div className="relationship-row" key={edge.id}><span>{noteName(edge.sourceNoteId === selected.id ? edge.targetNoteId : edge.sourceNoteId)}</span><button aria-label={`Remove relationship to ${noteName(edge.sourceNoteId === selected.id ? edge.targetNoteId : edge.sourceNoteId)}`} disabled={busy} onClick={() => void mutate(() => deleteRelationshipRequest(edge.id), 'Relationship removed.')}>×</button></div>)}</div>}
+              {visibleRelationship.length > 0 && <div className="console-list">{visibleRelationship.map((edge) => {
+                const connectedNoteName = noteName(edge.sourceNoteId === selected.id ? edge.targetNoteId : edge.sourceNoteId)
+                return <div className="relationship-row" key={edge.id}><span>{connectedNoteName}</span><button aria-label={`Remove relationship to ${connectedNoteName}`} disabled={busy} onClick={() => void mutate(() => deleteRelationshipRequest(edge.id), 'Relationship removed.')}>Remove connection</button></div>
+              })}</div>}
             </div></>}
         </details>
 
@@ -516,3 +547,39 @@ function GroupList({ title, groups, noteName, onChoose, onSelectNote }: {
 function Metric({ label, value }: { label: string; value: string }) { return <><dt>{label}</dt><dd>{value}</dd></> }
 
 function NoteTypes() { return <><option value="CONCEPT">Concept</option><option value="RESOURCE">Resource</option><option value="QUESTION">Question</option><option value="SUMMARY">Summary</option></> }
+
+type AppPath = '/' | '/explore'
+
+function resolvePath(pathname: string): AppPath {
+  return pathname.replace(/\/+$/, '') === '/explore' ? '/explore' : '/'
+}
+
+export default function App() {
+  const [path, setPath] = useState<AppPath>(() => resolvePath(window.location.pathname))
+  const [explorerEntering, setExplorerEntering] = useState(false)
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setPath(resolvePath(window.location.pathname))
+      setExplorerEntering(false)
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  const enterExplorer = useCallback(() => {
+    if (resolvePath(window.location.pathname) !== '/explore') window.history.pushState({}, '', '/explore')
+    setExplorerEntering(true)
+    setPath('/explore')
+  }, [])
+
+  const returnHome = useCallback(() => {
+    if (resolvePath(window.location.pathname) !== '/') window.history.pushState({}, '', '/')
+    setExplorerEntering(false)
+    setPath('/')
+  }, [])
+
+  return path === '/explore'
+    ? <GalaxyExplorerApp onHome={returnHome} entering={explorerEntering} />
+    : <Suspense fallback={<main className="landing-loading" role="status" aria-label="Preparing the cosmic scene" />}><LandingPage onEnter={enterExplorer} /></Suspense>
+}

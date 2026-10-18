@@ -1,0 +1,31 @@
+# Java / Maven
+**/target/
+*.class
+hs_err_pid*.log
+
+# Node / Vite
+**/node_modules/
+**/dist/
+**/.vite/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# IDE and operating-system files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+Desktop.ini

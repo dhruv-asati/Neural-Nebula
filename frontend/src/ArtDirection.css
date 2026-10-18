@@ -1,0 +1,242 @@
+:root {
+  color: #d8d7d1;
+  background: #030507;
+}
+
+.app-shell {
+  background: #030507;
+}
+
+.scene-wash {
+  background: none;
+}
+
+.edge-fade {
+  box-shadow: inset 0 0 100px 18px rgba(0, 0, 0, .5);
+}
+
+.masthead {
+  border-bottom-color: rgba(185, 185, 178, .14);
+  background: linear-gradient(180deg, rgba(3, 5, 7, .88), rgba(3, 5, 7, .28));
+}
+
+.brand-mark i {
+  border-color: #b7a27b;
+  box-shadow: none;
+}
+
+.brand-mark i:nth-child(2) {
+  border-color: #8e9aa0;
+}
+
+.brand-mark i:nth-child(3) {
+  background: #e1c48a;
+  box-shadow: none;
+}
+
+.signal-dot {
+  box-shadow: none;
+}
+
+.node-count > span {
+  color: #e0ded6;
+}
+
+.legend {
+  color: #a4a49e;
+}
+
+.legend-dot {
+  box-shadow: none;
+}
+
+.concept { color: #b5c2ca; background: #b5c2ca; }
+.resource { color: #d3b77e; background: #d3b77e; }
+.question { color: #bb8276; background: #bb8276; }
+.summary { color: #d2d0c4; background: #d2d0c4; }
+
+.note-panel,
+.state-card {
+  border-color: rgba(184, 184, 176, .2);
+  background: rgba(8, 10, 12, .88);
+  box-shadow: 0 18px 55px rgba(0, 0, 0, .42);
+  backdrop-filter: blur(7px);
+}
+
+.panel-kicker,
+.panel-star,
+.hint-cross {
+  color: #c2a76f;
+}
+
+.note-panel h1,
+.state-card p {
+  color: #e6e3db;
+}
+
+.note-type {
+  color: #c4a86d;
+}
+
+.note-content {
+  color: #c1c0b9;
+}
+
+.note-meta strong {
+  color: #dfd1ad;
+}
+
+.tag-list span {
+  border-color: rgba(185, 170, 134, .25);
+  color: #d0c5a8;
+  background: rgba(185, 170, 134, .06);
+}
+
+.deselect-button:hover {
+  color: #e1c58c;
+}
+
+.interaction-hint {
+  color: #999a96;
+}
+
+.interaction-hint i {
+  background: #9a9586;
+}
+
+.state-symbol {
+  color: #c2a76f;
+}
+
+.loader-orbit {
+  border-color: rgba(194, 167, 111, .45);
+}
+
+.loader-orbit::before {
+  border-color: rgba(154, 164, 165, .55);
+}
+
+.loader-orbit i {
+  background: #d5b878;
+  box-shadow: none;
+}
+
+.error-card button {
+  border-color: rgba(194, 167, 111, .4);
+  color: #ded0b0;
+  background: rgba(194, 167, 111, .08);
+}
+
+.explorer-panel {
+  border-color: rgba(183, 183, 176, .18);
+  background: rgba(7, 9, 11, .88);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, .36);
+  backdrop-filter: blur(7px);
+}
+
+.explorer-heading h2,
+.console-section h3,
+.console-section summary,
+.group-item > summary {
+  color: #deddd6;
+}
+
+.explorer-panel button,
+.explorer-panel input,
+.explorer-panel select,
+.explorer-panel textarea {
+  color: #d8d7d1;
+}
+
+.explorer-panel button {
+  border-radius: 2px;
+}
+
+.explorer-panel input:focus,
+.explorer-panel select:focus,
+.explorer-panel textarea:focus,
+.explorer-panel button:focus-visible {
+  outline-color: #d2b675;
+  border-color: rgba(210, 182, 117, .68);
+}
+
+.history-controls button,
+.button-row button,
+.manage-form > button,
+.manage-form button,
+.quiet-button,
+.console-retry {
+  border-color: rgba(190, 178, 146, .31);
+  color: #d8ccae;
+  background: rgba(190, 178, 146, .07);
+}
+
+.history-controls button:not(:disabled):hover,
+.button-row button:not(:disabled):hover,
+.manage-form button:not(:disabled):hover,
+.console-retry:hover {
+  background: rgba(190, 178, 146, .14);
+}
+
+.console-row {
+  color: #d0d0ca !important;
+  background: rgba(255, 255, 255, .035);
+}
+
+.console-row:hover {
+  border-color: rgba(194, 167, 111, .28);
+  background: rgba(194, 167, 111, .08);
+}
+
+.suggestions button {
+  border-color: rgba(151, 171, 176, .3);
+  color: #c1cbca !important;
+  background: rgba(151, 171, 176, .07);
+}
+
+.concept-note b,
+.metrics dd,
+.learning-list,
+.leaderboard {
+  color: #d0bc8f;
+}
+
+.groups-list h4,
+.manage-form h4 {
+  color: #c5b897;
+}
+
+.group-highlight {
+  border-color: rgba(190, 178, 146, .25);
+  color: #cfc3a5 !important;
+  background: rgba(190, 178, 146, .06);
+}
+
+.learning-list button:hover,
+.group-note:hover {
+  color: #e1c58c !important;
+}
+
+.danger-button {
+  border-color: rgba(196, 121, 107, .42) !important;
+  color: #d29a8f !important;
+  background: rgba(196, 121, 107, .07) !important;
+}
+
+@media (max-width: 750px) {
+  .explorer-panel {
+    background: rgba(7, 9, 11, .94);
+  }
+}
+
+@media (min-width: 451px) and (max-width: 750px) {
+  .explorer-panel {
+    width: min(260px, calc(100vw - 40px));
+  }
+
+  .note-panel {
+    right: 12px;
+    width: min(220px, calc(100vw - 296px));
+    padding: 14px 12px;
+  }
+}

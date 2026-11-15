@@ -137,7 +137,8 @@ export async function fetchRelationshipSuggestions(noteId: string, signal?: Abor
     if (typeof item.noteId !== 'string' || typeof item.similarity !== 'number' || !Number.isFinite(item.similarity) || item.similarity < 0 || item.similarity > 1) {
       throw new Error('The backend returned an invalid similarity score.')
     }
-    return { noteId: item.noteId, similarity: item.similarity }
+    return { noteId: item.noteId, similarity: item.similarity,
+      ...(typeof item.reason === 'string' ? { reason: item.reason } : {}) }
   })
 }
 

@@ -1,22 +1,29 @@
-import { useEffect, useMemo, useRef } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
-import { Billboard, OrbitControls, Text } from '@react-three/drei'
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { Billboard, Environment, Lightformer, OrbitControls, Text } from '@react-three/drei'
 import * as THREE from 'three'
-import type { GraphNote, GraphRelationship } from '../types'
+import type { GalaxyCameraSnapshot, GraphNote, GraphRelationship } from '../types'
 import { createGalaxyLayout, createNeighborMap, nodeColor, nodeRadius } from '../galaxy/layout'
 
 interface GalaxyCanvasProps {
   notes: GraphNote[]
   edges: GraphRelationship[]
   selectedId: string | null
+  connectionExplorationId: string | null
+  cameraResetKey: number
+  cameraCenterKey: number
+  zoomCommand: { key: number; direction: -1 | 1 }
+  onCameraChange: (snapshot: GalaxyCameraSnapshot) => void
   hoveredId: string | null
   highlightIds: string[] | null
   pathIds: string[] | null
+  traversalIds: string[] | null
   pathPulseKey: number
   visualEvent: { key: number; kind: 'create' | 'delete' | 'relationship'; noteId?: string; sourceId?: string; targetId?: string; position?: [number, number, number] } | null
   onVisualEventComplete: (key: number) => void
   onSelect: (note: GraphNote) => void
   onHover: (id: string | null) => void
+  onBackgroundClick: () => void
 }
 
 function hashText(value: string) {
@@ -29,34 +36,57 @@ function hashText(value: string) {
 }
 
 const nodeSphereGeometry = new THREE.SphereGeometry(1, 16, 16)
-const nodeCoronaGeometry = new THREE.TorusGeometry(1, 0.026, 4, 40)
 const knownNodeTypes = new Set(['CONCEPT', 'RESOURCE', 'QUESTION', 'SUMMARY'])
 const fallbackNodeColors = ['#e5dbc5', '#a9c0cc', '#d6b16f', '#c99584']
-const flowTrailOffsets = [0, 0.018, 0.038] as const
-const idleGlowColor = new THREE.Color('#594526')
-const activeGlowColor = new THREE.Color('#f5d48f')
-const pathGlowColor = new THREE.Color('#d4e7ec')
-const idlePulseCoreColor = new THREE.Color('#8c754c')
-const activePulseCoreColor = new THREE.Color('#fff1d2')
-const pathPulseCoreColor = new THREE.Color('#e4f0f0')
+const flowTrailOffsets = [0, 0.055, 0.11] as const
+const idleGlowColor = new THREE.Color('#35444d')
+const hoverGlowColor = new THREE.Color('#718a94')
+const activeGlowColor = new THREE.Color('#62d8ff')
+const traversalGlowColor = new THREE.Color('#83e2ff')
+const pathGlowColor = new THREE.Color('#d9f5ff')
+const idlePulseCoreColor = new THREE.Color('#637782')
+const activePulseCoreColor = new THREE.Color('#e8fbff')
+const traversalPulseCoreColor = new THREE.Color('#e3fbff')
+const pathPulseCoreColor = new THREE.Color('#f5fdff')
 const pulseColorScratch = new THREE.Color()
 
-function createNodeHaloTexture() {
-  const canvas = document.createElement('canvas')
-  canvas.width = 64
-  canvas.height = 64
-  const context = canvas.getContext('2d')
-  if (!context) return new THREE.Texture()
-  const gradient = context.createRadialGradient(32, 32, 1, 32, 32, 32)
-  gradient.addColorStop(0, 'rgba(255,248,228,0.34)')
-  gradient.addColorStop(0.2, 'rgba(255,229,178,0.13)')
-  gradient.addColorStop(0.55, 'rgba(246,202,134,0.035)')
-  gradient.addColorStop(1, 'rgba(246,202,134,0)')
-  context.fillStyle = gradient
-  context.fillRect(0, 0, 64, 64)
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.colorSpace = THREE.SRGBColorSpace
-  return texture
+function deriveTraversalEdgeIds(traversalIds: string[], edges: GraphRelationship[]) {
+  if (traversalIds.length < 2) return [] as string[]
+  const expected = new Set(traversalIds)
+  const edgeByPair = new Map<string, string>()
+  const adjacency = new Map<string, string[]>(traversalIds.map((id) => [id, []]))
+  for (const edge of edges) {
+    if (!expected.has(edge.sourceNoteId) || !expected.has(edge.targetNoteId)) continue
+    const key = [edge.sourceNoteId, edge.targetNoteId].sort().join('\u0000')
+    edgeByPair.set(key, edge.id)
+    adjacency.get(edge.sourceNoteId)?.push(edge.targetNoteId)
+    adjacency.get(edge.targetNoteId)?.push(edge.sourceNoteId)
+  }
+  adjacency.forEach((neighbors) => neighbors.sort())
+  const stack: Array<{ id: string; parent: string | null }> = [{ id: traversalIds[0], parent: null }]
+  const visited = new Set<string>()
+  const simulatedOrder: string[] = []
+  const traversalEdges: string[] = []
+  while (stack.length) {
+    const current = stack.pop()!
+    if (visited.has(current.id)) continue
+    visited.add(current.id)
+    simulatedOrder.push(current.id)
+    if (current.parent) {
+      const edgeId = edgeByPair.get([current.parent, current.id].sort().join('\u0000'))
+      if (edgeId) traversalEdges.push(edgeId)
+    }
+    const neighbors = adjacency.get(current.id) ?? []
+    for (let index = neighbors.length - 1; index >= 0; index -= 1) {
+      const neighbor = neighbors[index]
+      if (!visited.has(neighbor)) stack.push({ id: neighbor, parent: current.id })
+    }
+  }
+  // Only animate when the returned backend order is exactly reproduced from the
+  // current graph; otherwise show the normal highlight without inventing edges.
+  return simulatedOrder.length === traversalIds.length && simulatedOrder.every((id, index) => id === traversalIds[index])
+    ? traversalEdges
+    : []
 }
 
 function compactNodeTitle(title: string) {
@@ -66,8 +96,8 @@ function compactNodeTitle(title: string) {
 
 type FloatingTextMesh = THREE.Mesh & { fillOpacity: number; outlineOpacity: number }
 
-function NodeLabel({ title, offset, hovered, selected, onPath }: {
-  title: string; offset: number; hovered: boolean; selected: boolean; onPath: boolean
+function NodeLabel({ title, offset, hovered, selected, onPath, focusEmphasis = false }: {
+  title: string; offset: number; hovered: boolean; selected: boolean; onPath: boolean; focusEmphasis?: boolean
 }) {
   const label = useRef<FloatingTextMesh>(null)
   const worldPosition = useRef(new THREE.Vector3())
@@ -78,7 +108,7 @@ function NodeLabel({ title, offset, hovered, selected, onPath }: {
     text.getWorldPosition(worldPosition.current)
     const distance = camera.position.distanceTo(worldPosition.current)
     const distanceFade = 1 - THREE.MathUtils.smoothstep(distance, 28, 42)
-    const emphasis = selected ? 1 : hovered ? 0.86 : onPath ? 0.72 : 0
+    const emphasis = selected ? 1 : hovered ? 0.86 : focusEmphasis ? 0.78 : onPath ? 0.72 : 0
     const visibility = emphasis > 0 ? Math.max(distanceFade, 0.78) : distanceFade
     const targetOpacity = (0.3 + emphasis * 0.68) * visibility
     const targetOutline = (0.11 + emphasis * 0.3) * visibility
@@ -92,7 +122,7 @@ function NodeLabel({ title, offset, hovered, selected, onPath }: {
     <Text
       ref={label}
       fontSize={0.14}
-      color="#e6decb"
+      color="#e2e8eb"
       anchorX="center"
       anchorY="bottom"
       textAlign="center"
@@ -101,7 +131,7 @@ function NodeLabel({ title, offset, hovered, selected, onPath }: {
       fillOpacity={0.3}
       outlineWidth={0.018}
       outlineBlur={0.012}
-      outlineColor="#d6b875"
+      outlineColor="#82949d"
       outlineOpacity={0.11}
       depthOffset={-1}
       raycast={() => null}
@@ -111,25 +141,15 @@ function NodeLabel({ title, offset, hovered, selected, onPath }: {
   </Billboard>
 }
 
-function NoteNode({ note, position, active, dimmed, hovered, selected, prominent, onPath, haloTexture, arrivalUntil, onSelect, onHover }: {
-  note: GraphNote; position: [number, number, number]; active: boolean; dimmed: boolean
-  hovered: boolean; selected: boolean; prominent: boolean; onPath: boolean; haloTexture: THREE.Texture
-  arrivalUntil: Map<string, number>
+function NoteNode({ note, position, active, hovered, selected, onPath, focusEmphasis = false, onSelect, onHover }: {
+  note: GraphNote; position: [number, number, number]; active: boolean
+  hovered: boolean; selected: boolean; onPath: boolean; focusEmphasis?: boolean
   onSelect: () => void; onHover: (id: string | null) => void
 }) {
   const group = useRef<THREE.Group>(null)
-  const coreMaterial = useRef<THREE.MeshStandardMaterial>(null)
-  const haloMaterial = useRef<THREE.SpriteMaterial>(null)
+  const phase = (hashText(note.id) % 1000) / 1000 * Math.PI * 2
   const reducedMotion = useRef(false)
-  const seed = hashText(note.id)
-  const phase = ((seed >>> 8) % 1000) / 1000 * Math.PI * 2
-  const sizeVariation = 0.9 + (seed % 201) / 1000
-  const radius = nodeRadius(note.importance) * sizeVariation
-  const typeKey = note.type.toUpperCase()
-  const typeTint = knownNodeTypes.has(typeKey) ? nodeColor(note.type) : fallbackNodeColors[seed % fallbackNodeColors.length]
-  const coreColor = useMemo(() => new THREE.Color(typeTint).lerp(new THREE.Color('#fff5df'), selected ? 0.09 : 0), [selected, typeTint])
-  const bodyScale = selected ? 1.7 : prominent ? 1.8 : 1.62
-  const selectedRadius = radius * bodyScale
+  const radius = nodeRadius(note.importance)
 
   useEffect(() => {
     const preference = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -138,168 +158,213 @@ function NoteNode({ note, position, active, dimmed, hovered, selected, prominent
     preference.addEventListener('change', update)
     return () => preference.removeEventListener('change', update)
   }, [])
-
   useFrame((state, delta) => {
     if (!group.current) return
-    const target = selected ? 1.2 : active ? 1.12 : 1
-    const breath = reducedMotion.current ? 1 : 0.97 + Math.sin(state.clock.elapsedTime * 1.15 + phase) * 0.025
-    group.current.scale.setScalar(THREE.MathUtils.damp(group.current.scale.x, target * breath, 7, delta))
-    if (coreMaterial.current) {
-      const shimmer = reducedMotion.current ? 0 : Math.sin(state.clock.elapsedTime * 1.35 + phase) * 0.035
-      coreMaterial.current.opacity = (dimmed ? 0.48 : 0.98) + shimmer
-      const baseEmission = dimmed ? 0.12 : selected ? 0.72 : prominent ? 0.34 : active ? 0.3 : 0.2
-      const brightnessVariation = 0.9 + ((seed >>> 20) % 201) / 1000
-      const arrivalProgress = THREE.MathUtils.clamp(((arrivalUntil.get(note.id) ?? 0) - state.clock.elapsedTime) / 0.28, 0, 1)
-      const arrivalResponse = arrivalProgress * arrivalProgress * (3 - 2 * arrivalProgress)
-      coreMaterial.current.emissiveIntensity = baseEmission * brightnessVariation + shimmer * 2 + arrivalResponse * 0.26
-    }
-    if (haloMaterial.current) {
-      const shimmer = reducedMotion.current ? 0 : Math.sin(state.clock.elapsedTime * 0.9 + phase) * 0.018
-      haloMaterial.current.opacity = (dimmed ? 0.025 : selected ? 0.24 : prominent ? 0.15 : 0.1) + shimmer
-    }
-  })
-  return (
-    <group ref={group} position={position}>
-      <mesh
-        scale={Math.max(0.34, radius * 2.1)}
-        onClick={(event) => { event.stopPropagation(); onSelect() }}
-        onPointerOver={(event) => { event.stopPropagation(); onHover(note.id); document.body.style.cursor = 'pointer' }}
-        onPointerOut={() => { onHover(null); document.body.style.cursor = 'auto' }}
-      >
-        <primitive object={nodeSphereGeometry} attach="geometry" />
-        <meshBasicMaterial transparent opacity={0} colorWrite={false} depthWrite={false} />
-      </mesh>
-      <sprite scale={[radius * (selected ? 4.4 : prominent ? 3.8 : 3.5), radius * (selected ? 4.4 : prominent ? 3.8 : 3.5), 1]} raycast={() => null}>
-        <spriteMaterial ref={haloMaterial} map={haloTexture} color={typeTint} transparent opacity={0.2} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
-      </sprite>
-      <mesh scale={selectedRadius} raycast={() => null}>
-        <primitive object={nodeSphereGeometry} attach="geometry" />
-        <meshStandardMaterial ref={coreMaterial} color={coreColor} emissive={coreColor} emissiveIntensity={0.2} roughness={0.34} metalness={0.08} transparent opacity={0.98} depthWrite={false} />
-      </mesh>
-      <mesh scale={selectedRadius * 0.3} raycast={() => null}>
-        <primitive object={nodeSphereGeometry} attach="geometry" />
-        <meshBasicMaterial color={selected ? '#fff8e9' : '#fff3d7'} transparent opacity={selected ? 0.96 : prominent ? 0.88 : 0.78} depthWrite={false} toneMapped={false} />
-      </mesh>
-      {(prominent || active) && !selected && <mesh scale={radius * 1.48} rotation={[Math.PI / 2.25, 0, 0]} raycast={() => null}>
-        <primitive object={nodeCoronaGeometry} attach="geometry" />
-        <meshBasicMaterial color={prominent ? '#e7c483' : typeTint} transparent opacity={dimmed ? 0.06 : prominent ? 0.2 : 0.15} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
-      </mesh>}
-      {selected && <NodeCorona radius={selectedRadius} seed={note.id} />}
-      <NodeLabel title={note.title} offset={radius * (selected ? 2.7 : 2.4) + 0.08} hovered={hovered} selected={selected} onPath={onPath} />
-    </group>
-  )
-}
-
-function NodeCorona({ radius, seed }: { radius: number; seed: string }) {
-  const electrons = useRef<Array<THREE.Mesh | null>>([])
-  const reducedMotion = useRef(false)
-  const orbits = useMemo(() => {
-    const random = createRandom(hashText(seed))
-    return [
-      { rx: 1.72, ry: 1.02, tilt: new THREE.Euler(0.48, 0.18, 0.12), color: '#e8d5ad' },
-      { rx: 1.94, ry: 0.78, tilt: new THREE.Euler(1.05, 0.82, 0.34), color: '#f0e5cb' },
-      { rx: 1.58, ry: 0.88, tilt: new THREE.Euler(0.22, 1.68, 0.92), color: '#cbd9dc' },
-    ].map((definition, index) => {
-      const axisU = new THREE.Vector3(1, 0, 0).applyEuler(definition.tilt)
-      const axisV = new THREE.Vector3(0, 1, 0).applyEuler(definition.tilt)
-      const curve = new THREE.EllipseCurve(0, 0, radius * definition.rx, radius * definition.ry, 0, Math.PI * 2, false, 0)
-      const points = curve.getPoints(96)
-      const values = new Float32Array(points.length * 3)
-      points.forEach((point, pointIndex) => {
-        const offset = pointIndex * 3
-        values[offset] = axisU.x * point.x + axisV.x * point.y
-        values[offset + 1] = axisU.y * point.x + axisV.y * point.y
-        values[offset + 2] = axisU.z * point.x + axisV.z * point.y
-      })
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', new THREE.BufferAttribute(values, 3))
-      return {
-        geometry, axisU, axisV, rx: radius * definition.rx, ry: radius * definition.ry,
-        color: definition.color, speed: 0.44 + random() * 0.24, phase: random() * Math.PI * 2,
-        direction: index % 2 === 0 ? 1 : -1,
-      }
-    })
-  }, [radius, seed])
-
-  useEffect(() => () => orbits.forEach((orbit) => orbit.geometry.dispose()), [orbits])
-  useEffect(() => {
-    const preference = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const update = () => { reducedMotion.current = preference.matches }
-    update()
-    preference.addEventListener('change', update)
-    return () => preference.removeEventListener('change', update)
-  }, [])
-  useFrame((state) => {
-    const elapsed = reducedMotion.current ? 0 : state.clock.elapsedTime
-    for (let index = 0; index < orbits.length; index += 1) {
-      const orbit = orbits[index]
-      const electron = electrons.current[index]
-      if (!electron) continue
-      const angle = orbit.phase + elapsed * orbit.speed * orbit.direction
-      const x = Math.cos(angle) * orbit.rx
-      const y = Math.sin(angle) * orbit.ry
-      electron.position.set(
-        orbit.axisU.x * x + orbit.axisV.x * y,
-        orbit.axisU.y * x + orbit.axisV.y * y,
-        orbit.axisU.z * x + orbit.axisV.z * y,
-      )
-    }
+    const target = selected ? 1.1 : hovered ? 1.06 : active ? 1.035 : 1
+    const breath = reducedMotion.current ? 1 : 1 + Math.sin(state.clock.elapsedTime * 0.72 + phase) * 0.008
+    group.current.scale.setScalar(THREE.MathUtils.damp(group.current.scale.x, target * breath, 8, delta))
   })
 
-  return <group raycast={() => null}>
-    {orbits.map((orbit, index) => <group key={index} raycast={() => null}>
-      <lineLoop geometry={orbit.geometry} raycast={() => null}>
-        <lineBasicMaterial color={orbit.color} transparent opacity={0.18} depthWrite={false} toneMapped={false} />
-      </lineLoop>
-      <mesh ref={(mesh) => { electrons.current[index] = mesh }} scale={radius * 0.075} raycast={() => null}>
-        <primitive object={nodeSphereGeometry} attach="geometry" />
-        <meshBasicMaterial color={orbit.color} transparent opacity={0.82} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
-      </mesh>
-    </group>)}
+  return <group ref={group} position={position}>
+    <mesh
+      scale={Math.max(0.34, radius * 2.1)}
+      onClick={(event) => { event.stopPropagation(); onSelect() }}
+      onPointerOver={(event) => { event.stopPropagation(); onHover(note.id); document.body.style.cursor = 'pointer' }}
+      onPointerOut={() => { onHover(null); document.body.style.cursor = 'auto' }}
+    >
+      <primitive object={nodeSphereGeometry} attach="geometry" />
+      <meshBasicMaterial transparent opacity={0} colorWrite={false} depthWrite={false} />
+    </mesh>
+    <NodeLabel title={note.title} offset={radius * (selected ? 2.7 : 2.4) + 0.08} hovered={hovered} selected={selected} onPath={onPath} focusEmphasis={focusEmphasis} />
   </group>
 }
 
-function CameraFocus({ focus }: { focus: [number, number, number] | null }) {
+function CameraFocus({ focus, explorationActive, resetKey, centerKey, centerTarget, centerRadius, initialCameraPosition, zoomCommand, onCameraChange, frameDistance }: {
+  focus: [number, number, number] | null; resetKey: number; centerKey: number
+  explorationActive: boolean
+  centerTarget: [number, number, number]; centerRadius: number; initialCameraPosition: [number, number, number]
+  zoomCommand: GalaxyCanvasProps['zoomCommand']; onCameraChange: GalaxyCanvasProps['onCameraChange']
+  frameDistance: number
+}) {
+  const { size, gl } = useThree()
   const controls = useRef<any>(null)
+  const previousResetKey = useRef(resetKey)
+  const previousCenterKey = useRef(centerKey)
+  const previousExplorationActive = useRef(explorationActive)
+  const previousFocus = useRef(focus)
+  const previousZoomKey = useRef(zoomCommand.key)
+  const lastCameraNotice = useRef(0)
+  const reducedMotion = useRef(false)
+  const zoomTargetDistance = useRef<number | null>(null)
+  const zoomDirection = useMemo(() => new THREE.Vector3(), [])
   const transition = useRef<{
     fromTarget: THREE.Vector3; toTarget: THREE.Vector3
     fromPosition: THREE.Vector3; toPosition: THREE.Vector3; startedAt: number
   } | null>(null)
   useEffect(() => {
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => { reducedMotion.current = preference.matches }
+    update()
+    preference.addEventListener('change', update)
+    return () => preference.removeEventListener('change', update)
+  }, [])
+  useEffect(() => {
     const control = controls.current
     if (!control) return
+    if (previousResetKey.current !== resetKey) {
+      previousResetKey.current = resetKey
+      previousCenterKey.current = centerKey
+      zoomTargetDistance.current = null
+      const fromTarget = control.target.clone()
+      const toTarget = new THREE.Vector3(0, 0, 0)
+      const fromPosition = control.object.position.clone()
+      const toPosition = new THREE.Vector3(...initialCameraPosition)
+      transition.current = { fromTarget, toTarget, fromPosition, toPosition, startedAt: performance.now() }
+      return
+    }
+    if (previousCenterKey.current !== centerKey) {
+      previousCenterKey.current = centerKey
+      zoomTargetDistance.current = null
+      const fromTarget = control.target.clone()
+      const toTarget = new THREE.Vector3(...centerTarget)
+      const fromPosition = control.object.position.clone()
+      const cameraOffset = fromPosition.clone().sub(fromTarget)
+      const camera = control.object as THREE.PerspectiveCamera
+      const halfVerticalFov = THREE.MathUtils.degToRad(camera.fov / 2)
+      const halfHorizontalFov = Math.atan(Math.tan(halfVerticalFov) * camera.aspect)
+      const limitingHalfFov = Math.min(halfVerticalFov, halfHorizontalFov)
+      const fitDistance = centerRadius / Math.max(0.05, Math.sin(limitingHalfFov)) * 1.12
+      const targetDistance = THREE.MathUtils.clamp(fitDistance, control.minDistance, control.maxDistance)
+      cameraOffset.setLength(targetDistance)
+      const toPosition = toTarget.clone().add(cameraOffset)
+      transition.current = { fromTarget, toTarget, fromPosition, toPosition, startedAt: performance.now() }
+      return
+    }
+    if (previousExplorationActive.current !== explorationActive) {
+      previousExplorationActive.current = explorationActive
+      previousFocus.current = focus
+      transition.current = null
+      zoomTargetDistance.current = null
+      return
+    }
+    if (explorationActive) {
+      previousFocus.current = focus
+      transition.current = null
+      zoomTargetDistance.current = null
+      return
+    }
+    if (previousFocus.current === focus) return
+    previousFocus.current = focus
     // Deselecting returns to the galaxy by restoring its normal emphasis; preserve the
     // user's current orbit target and zoom instead of pulling the camera to the origin.
     if (!focus) { transition.current = null; return }
 
+    zoomTargetDistance.current = null
     const fromTarget = control.target.clone()
     const toTarget = focus ? new THREE.Vector3(...focus) : new THREE.Vector3()
     const fromPosition = control.object.position.clone()
     const cameraOffset = fromPosition.clone().sub(fromTarget)
+    // Keep the current orbit direction, but move in to a readable inspection
+    // distance. Preserve a closer existing view rather than zooming back out.
+    const focusDistance = THREE.MathUtils.clamp(Math.min(cameraOffset.length(), 12.5), control.minDistance, control.maxDistance)
+    cameraOffset.setLength(focusDistance)
     const toPosition = toTarget.clone().add(cameraOffset)
     transition.current = { fromTarget, toTarget, fromPosition, toPosition, startedAt: performance.now() }
-  }, [focus])
+  }, [centerKey, centerRadius, centerTarget, explorationActive, focus, initialCameraPosition, resetKey])
+
+  const requestZoom = useCallback((factor: number) => {
+    const control = controls.current
+    if (!control) return
+    const camera = control.object as THREE.PerspectiveCamera
+    const currentDistance = camera.position.distanceTo(control.target)
+    const startingDistance = zoomTargetDistance.current ?? currentDistance
+    zoomTargetDistance.current = THREE.MathUtils.clamp(startingDistance * factor, control.minDistance, control.maxDistance)
+    transition.current = null
+  }, [])
+
+  useEffect(() => {
+    if (previousZoomKey.current === zoomCommand.key) return
+    previousZoomKey.current = zoomCommand.key
+    // OrbitControls' three-stdlib dollyIn multiplies camera distance in this
+    // version, so zooming toward the graph means reducing the distance.
+    requestZoom(zoomCommand.direction > 0 ? 1 / 1.25 : 1.25)
+  }, [requestZoom, zoomCommand])
+
+  useEffect(() => {
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      requestZoom(Math.exp(THREE.MathUtils.clamp(event.deltaY, -240, 240) * 0.00125))
+    }
+    gl.domElement.addEventListener('wheel', handleWheel, { capture: true, passive: false })
+    return () => gl.domElement.removeEventListener('wheel', handleWheel, true)
+  }, [gl, requestZoom])
 
   useEffect(() => {
     const control = controls.current
     if (!control) return
-    const stopFocusForManualOrbit = () => { transition.current = null }
+    const forward = new THREE.Vector3()
+    const right = new THREE.Vector3()
+    const up = new THREE.Vector3()
+    const publishView = (force = false) => {
+      const now = performance.now()
+      if (!force && now - lastCameraNotice.current < 90) return
+      lastCameraNotice.current = now
+      const offset = control.object.position.clone().sub(control.target)
+      const camera = control.object as THREE.PerspectiveCamera
+      camera.updateMatrixWorld()
+      camera.getWorldDirection(forward)
+      right.set(1, 0, 0).applyQuaternion(camera.quaternion)
+      up.set(0, 1, 0).applyQuaternion(camera.quaternion)
+      onCameraChange({
+        x: control.target.x, z: control.target.z, distance: offset.length(),
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        forward: [forward.x, forward.y, forward.z], right: [right.x, right.y, right.z], up: [up.x, up.y, up.z],
+        target: [control.target.x, control.target.y, control.target.z],
+        fov: camera.fov, aspect: camera.aspect, near: camera.near,
+      })
+    }
+    const handleChange = () => publishView()
+    control.addEventListener('change', handleChange)
+    publishView(true)
+    return () => control.removeEventListener('change', handleChange)
+  }, [onCameraChange, size.height, size.width])
+
+  useEffect(() => {
+    const control = controls.current
+    if (!control) return
+    const stopFocusForManualOrbit = () => { transition.current = null; zoomTargetDistance.current = null }
     control.addEventListener('start', stopFocusForManualOrbit)
     return () => control.removeEventListener('start', stopFocusForManualOrbit)
   }, [])
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     const control = controls.current
+    if (control && zoomTargetDistance.current !== null) {
+      const camera = control.object as THREE.PerspectiveCamera
+      zoomDirection.subVectors(camera.position, control.target)
+      const distance = zoomDirection.length()
+      const nextDistance = reducedMotion.current
+        ? zoomTargetDistance.current
+        : THREE.MathUtils.damp(distance, zoomTargetDistance.current, 11, delta)
+      camera.position.copy(control.target).addScaledVector(zoomDirection.normalize(), nextDistance)
+      control.update()
+      if (Math.abs(nextDistance - zoomTargetDistance.current) < 0.015) {
+        camera.position.copy(control.target).addScaledVector(zoomDirection.normalize(), zoomTargetDistance.current)
+        zoomTargetDistance.current = null
+        control.update()
+      }
+    }
     const movement = transition.current
     if (!control || !movement) return
-    const linear = Math.min(1, (performance.now() - movement.startedAt) / 850)
+    const linear = reducedMotion.current ? 1 : Math.min(1, (performance.now() - movement.startedAt) / 850)
     const eased = linear * linear * (3 - 2 * linear)
     control.target.lerpVectors(movement.fromTarget, movement.toTarget, eased)
     control.object.position.lerpVectors(movement.fromPosition, movement.toPosition, eased)
     control.update()
     if (linear >= 1) transition.current = null
   })
-  return <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.075} minDistance={5} maxDistance={48} rotateSpeed={0.55} />
+  return <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.075} minDistance={5} maxDistance={Math.max(48, frameDistance * 2.4)} rotateSpeed={0.55} />
 }
 
 function GraphMutationEffect({ event, position, target, onComplete }: {
@@ -382,6 +447,417 @@ function createRandom(seed: number) {
     value = (value * 1664525 + 1013904223) >>> 0
     return value / 4294967296
   }
+}
+
+function createStarNodeGeometry(
+  notes: GraphNote[],
+  positions: Map<string, [number, number, number]>,
+  edges: GraphRelationship[],
+  emphasisIds: Set<string> | null,
+  pathIds: string[] | null,
+) {
+  const points: number[] = []
+  const colors: number[] = []
+  const sizes: number[] = []
+  const phases: number[] = []
+  const spikeStrengths: number[] = []
+  const emphasized: number[] = []
+  const onPath: number[] = []
+  const nodeIndices: number[] = []
+  const degrees = new Map(notes.map((note) => [note.id, 0]))
+  for (const edge of edges) {
+    degrees.set(edge.sourceNoteId, (degrees.get(edge.sourceNoteId) ?? 0) + 1)
+    degrees.set(edge.targetNoteId, (degrees.get(edge.targetNoteId) ?? 0) + 1)
+  }
+  const pathSet = pathIds ? new Set(pathIds) : null
+
+  notes.forEach((note, nodeIndex) => {
+    const point = positions.get(note.id)
+    if (!point) return
+    const seed = hashText(note.id)
+    const degree = degrees.get(note.id) ?? 0
+    const color = new THREE.Color(knownNodeTypes.has(note.type.toUpperCase()) ? nodeColor(note.type) : fallbackNodeColors[seed % fallbackNodeColors.length])
+    color.multiplyScalar(0.9 + ((seed >>> 20) % 201) / 1000)
+    points.push(...point)
+    colors.push(color.r, color.g, color.b)
+    // Keep even low-importance notes visibly readable at the default camera
+    // distance; importance and graph degree still create a clear hierarchy.
+    sizes.push(Math.max(0.42, nodeRadius(note.importance) * 1.65 + Math.min(0.2, Math.sqrt(degree) * 0.04)) * 1.22 * 1.65 * 1.18)
+    phases.push((seed % 1000) / 1000 * Math.PI * 2)
+    spikeStrengths.push(Math.min(1, 0.28 + note.importance / 150 + Math.sqrt(degree) * 0.09))
+    emphasized.push(emphasisIds?.has(note.id) ? 1 : 0)
+    onPath.push(pathSet?.has(note.id) ? 1 : 0)
+    nodeIndices.push(nodeIndex)
+  })
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3))
+  geometry.setAttribute('aColor', new THREE.Float32BufferAttribute(colors, 3))
+  geometry.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1))
+  geometry.setAttribute('aPhase', new THREE.Float32BufferAttribute(phases, 1))
+  geometry.setAttribute('aSpikes', new THREE.Float32BufferAttribute(spikeStrengths, 1))
+  geometry.setAttribute('aEmphasized', new THREE.Float32BufferAttribute(emphasized, 1))
+  geometry.setAttribute('aPath', new THREE.Float32BufferAttribute(onPath, 1))
+  geometry.setAttribute('aNodeIndex', new THREE.Float32BufferAttribute(nodeIndices, 1))
+  return geometry
+}
+
+// Three shared point buffers form a small, shallow 3D spiral system around each
+// real note position. The arm particles are deterministic per note and rotate
+// together in the vertex shader, avoiding per-node meshes or frame allocations.
+function createNodeGalaxyGeometry(notes: GraphNote[], positions: Map<string, [number, number, number]>, emphasisIds: Set<string> | null) {
+  const points: number[] = [], centers: number[] = [], colors: number[] = [], emphasized: number[] = []
+  const sizes: number[] = [], phases: number[] = [], alphas: number[] = [], spins: number[] = [], indices: number[] = []
+  const accents: Record<string, string> = {
+    CONCEPT: '#a9b8f3', RESOURCE: '#fff0c7', QUESTION: '#e7a3d1', SUMMARY: '#b9deef',
+  }
+  notes.forEach((note, nodeIndex) => {
+    const center = positions.get(note.id)
+    if (!center) return
+    const seed = hashText(note.id)
+    const random = createRandom(seed ^ 0x6e656275)
+    const type = note.type.toUpperCase()
+    const base = new THREE.Color(nodeColor(type))
+    const accent = new THREE.Color(accents[type] ?? '#d7e1e5')
+    const radius = 0.42 + Math.max(0, Math.min(100, note.importance)) * 0.004
+    const spin = 0.045 + (seed % 29) * 0.0018
+    const orientation = random() * Math.PI * 2
+    const orientationCos = Math.cos(orientation), orientationSin = Math.sin(orientation)
+    const flatten = 0.58 + random() * 0.3
+    const tilt = (random() - 0.5) * 0.72
+    const addParticle = (x: number, y: number, z: number, size: number, alpha: number) => {
+      const color = base.clone().lerp(accent, 0.14 + random() * 0.38).multiplyScalar(0.78 + random() * 0.4)
+      points.push(center[0] + x, center[1] + y, center[2] + z)
+      centers.push(...center); colors.push(color.r, color.g, color.b)
+      emphasized.push(emphasisIds?.has(note.id) ? 1 : 0)
+      sizes.push(size); phases.push(random() * Math.PI * 2); alphas.push(alpha * (0.78 + random() * 0.22))
+      spins.push(spin * (0.78 + random() * 0.44)); indices.push(nodeIndex)
+    }
+    const armCount = 3, particlesPerArm = 126
+    for (let arm = 0; arm < armCount; arm += 1) {
+      for (let particle = 0; particle < particlesPerArm; particle += 1) {
+        const progress = (particle + random() * 0.45) / particlesPerArm
+        const radial = radius * (0.14 + progress * 0.83)
+        const angle = arm * (Math.PI * 2 / armCount) + progress * 12.2 + (random() - 0.5) * 0.2
+        const planarX = Math.cos(angle) * radial
+        const planarZ = Math.sin(angle) * radial * flatten
+        const x = planarX * orientationCos - planarZ * orientationSin
+        const z = planarX * orientationSin + planarZ * orientationCos
+        const y = (random() - 0.5) * radius * 0.22 + x * tilt
+        addParticle(x, y, z, 0.058 + random() * 0.027, 0.62 + random() * 0.3)
+      }
+    }
+    for (let particle = 0; particle < 58; particle += 1) {
+      const angle = random() * Math.PI * 2
+      const radial = radius * (0.12 + Math.sqrt(random()) * 0.91)
+      const planarX = Math.cos(angle) * radial
+      const planarZ = Math.sin(angle) * radial * flatten
+      const x = planarX * orientationCos - planarZ * orientationSin
+      const z = planarX * orientationSin + planarZ * orientationCos
+      addParticle(x, (random() - 0.5) * radius * 0.3 + x * tilt, z, 0.032 + random() * 0.024, 0.32 + random() * 0.34)
+    }
+  })
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3))
+  geometry.setAttribute('aCenter', new THREE.Float32BufferAttribute(centers, 3))
+  geometry.setAttribute('aColor', new THREE.Float32BufferAttribute(colors, 3))
+  geometry.setAttribute('aEmphasized', new THREE.Float32BufferAttribute(emphasized, 1))
+  geometry.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1))
+  geometry.setAttribute('aPhase', new THREE.Float32BufferAttribute(phases, 1))
+  geometry.setAttribute('aAlpha', new THREE.Float32BufferAttribute(alphas, 1))
+  geometry.setAttribute('aSpin', new THREE.Float32BufferAttribute(spins, 1))
+  geometry.setAttribute('aNodeIndex', new THREE.Float32BufferAttribute(indices, 1))
+  return geometry
+}
+
+function createNodeGalaxyArmsGeometry(notes: GraphNote[], positions: Map<string, [number, number, number]>, emphasisIds: Set<string> | null) {
+  const points: number[] = [], centers: number[] = [], colors: number[] = [], spins: number[] = [], alphas: number[] = [], emphasized: number[] = []
+  const accents: Record<string, string> = {
+    CONCEPT: '#a9b8f3', RESOURCE: '#fff0c7', QUESTION: '#e7a3d1', SUMMARY: '#b9deef',
+  }
+  notes.forEach((note) => {
+    const center = positions.get(note.id)
+    if (!center) return
+    const seed = hashText(note.id)
+    const random = createRandom(seed ^ 0x73706972)
+    const type = note.type.toUpperCase()
+    const base = new THREE.Color(nodeColor(type)).lerp(new THREE.Color(accents[type] ?? '#d7e1e5'), 0.32)
+    const radius = 0.42 + Math.max(0, Math.min(100, note.importance)) * 0.004
+    const orientation = random() * Math.PI * 2
+    const orientationCos = Math.cos(orientation), orientationSin = Math.sin(orientation)
+    const flatten = 0.58 + random() * 0.3
+    const tilt = (random() - 0.5) * 0.72
+    const spin = 0.045 + (seed % 29) * 0.0018
+    const armCount = 3, segments = 54
+    for (let arm = 0; arm < armCount; arm += 1) {
+      let previous: [number, number, number] | null = null
+      for (let step = 0; step <= segments; step += 1) {
+        const progress = step / segments
+        const radial = radius * (0.12 + progress * 0.86)
+        const angle = arm * (Math.PI * 2 / armCount) + progress * 12.2
+        const planarX = Math.cos(angle) * radial
+        const planarZ = Math.sin(angle) * radial * flatten
+        const x = planarX * orientationCos - planarZ * orientationSin
+        const z = planarX * orientationSin + planarZ * orientationCos
+        const point: [number, number, number] = [center[0] + x, center[1] + x * tilt + Math.sin(progress * Math.PI * 4 + arm) * radius * 0.045, center[2] + z]
+        if (previous) {
+          for (const endpoint of [previous, point]) {
+            points.push(...endpoint); centers.push(...center)
+            colors.push(base.r, base.g, base.b); spins.push(spin)
+            emphasized.push(emphasisIds?.has(note.id) ? 1 : 0)
+            alphas.push((0.3 + (1 - progress) * 0.54) * (0.82 + random() * 0.18))
+          }
+        }
+        previous = point
+      }
+    }
+  })
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(points, 3))
+  geometry.setAttribute('aCenter', new THREE.Float32BufferAttribute(centers, 3))
+  geometry.setAttribute('aColor', new THREE.Float32BufferAttribute(colors, 3))
+  geometry.setAttribute('aSpin', new THREE.Float32BufferAttribute(spins, 1))
+  geometry.setAttribute('aAlpha', new THREE.Float32BufferAttribute(alphas, 1))
+  geometry.setAttribute('aEmphasized', new THREE.Float32BufferAttribute(emphasized, 1))
+  return geometry
+}
+
+function NodeGalaxyParticles({ notes, positions, selectedId, hoveredId, emphasisIds, explorationActive }: {
+  notes: GraphNote[]; positions: Map<string, [number, number, number]>; selectedId: string | null; hoveredId: string | null
+  emphasisIds: Set<string> | null; explorationActive: boolean
+}) {
+  const { size, gl, camera } = useThree()
+  const reducedMotion = useRef(false)
+  const shader = useRef<THREE.ShaderMaterial>(null)
+  const armShader = useRef<THREE.ShaderMaterial>(null)
+  const geometry = useMemo(() => createNodeGalaxyGeometry(notes, positions, emphasisIds), [notes, positions, emphasisIds])
+  const armGeometry = useMemo(() => createNodeGalaxyArmsGeometry(notes, positions, emphasisIds), [notes, positions, emphasisIds])
+  const material = useMemo(() => new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPixelScale: { value: 1 }, uSelectedNode: { value: -1 }, uHoveredNode: { value: -1 }, uExplorationActive: { value: 0 } },
+    vertexShader: `
+      attribute vec3 aCenter; attribute vec3 aColor; attribute float aSize; attribute float aPhase;
+      attribute float aAlpha; attribute float aSpin; attribute float aNodeIndex; attribute float aEmphasized;
+      uniform float uTime; uniform float uPixelScale; uniform float uSelectedNode; uniform float uHoveredNode; uniform float uExplorationActive;
+      varying vec3 vColor; varying float vAlpha; varying float vPhase; varying float vVisibility;
+      void main() {
+        float selected = 1.0 - step(0.5, abs(aNodeIndex - uSelectedNode));
+        float hovered = 1.0 - step(0.5, abs(aNodeIndex - uHoveredNode));
+        vec3 local = position - aCenter;
+        float angle = uTime * aSpin + aPhase * 0.025;
+        float c = cos(angle), s = sin(angle);
+        vec3 rotated = vec3(c * local.x + s * local.z, local.y, -s * local.x + c * local.z);
+        vec4 viewPosition = modelViewMatrix * vec4(aCenter + rotated, 1.0);
+        gl_Position = projectionMatrix * viewPosition;
+        gl_PointSize = clamp(aSize * uPixelScale / max(-viewPosition.z, 0.1), 1.1, 6.0);
+        vColor = mix(aColor, vec3(0.86, 0.94, 1.0), selected * 0.3 + hovered * 0.18);
+        vAlpha = aAlpha * (1.0 + selected * 0.18 + hovered * 0.12);
+        vVisibility = mix(1.0, mix(0.018, 1.0, aEmphasized), uExplorationActive);
+        vPhase = aPhase;
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime; varying vec3 vColor; varying float vAlpha; varying float vPhase; varying float vVisibility;
+      void main() {
+        vec2 point = gl_PointCoord * 2.0 - 1.0;
+        float radius = length(point);
+        if (radius > 1.0) discard;
+        float grain = exp(-radius * radius * 10.0);
+        float halo = exp(-radius * radius * 2.3);
+        float twinkle = 0.88 + 0.12 * sin(uTime * 0.68 + vPhase * 4.0);
+        float alpha = (grain * 0.68 + halo * 0.28) * vAlpha * twinkle * vVisibility;
+        if (alpha < 0.008) discard;
+        gl_FragColor = vec4(vColor * (1.15 + grain * 0.8), alpha);
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
+  }), [])
+  const armMaterial = useMemo(() => new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uExplorationActive: { value: 0 } },
+    vertexShader: `
+      attribute vec3 aCenter; attribute vec3 aColor; attribute float aSpin; attribute float aAlpha; attribute float aEmphasized;
+      uniform float uTime; uniform float uExplorationActive; varying vec3 vColor; varying float vAlpha; varying float vEmphasized;
+      void main() {
+        vec3 local = position - aCenter;
+        float angle = uTime * aSpin;
+        float c = cos(angle), s = sin(angle);
+        vec3 rotated = vec3(c * local.x + s * local.z, local.y, -s * local.x + c * local.z);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(aCenter + rotated, 1.0);
+        vColor = aColor;
+        vAlpha = aAlpha;
+        vEmphasized = aEmphasized;
+      }
+    `,
+    fragmentShader: `
+      uniform float uExplorationActive; varying vec3 vColor; varying float vAlpha; varying float vEmphasized;
+      void main() {
+        float visibility = mix(1.0, mix(0.018, 1.0, vEmphasized), uExplorationActive);
+        gl_FragColor = vec4(vColor * 1.25, vAlpha * 0.26 * visibility);
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false,
+  }), [])
+  const selectedIndex = useMemo(() => selectedId ? notes.findIndex((note) => note.id === selectedId) : -1, [notes, selectedId])
+  const hoveredIndex = useMemo(() => hoveredId ? notes.findIndex((note) => note.id === hoveredId) : -1, [notes, hoveredId])
+  useEffect(() => {
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => { reducedMotion.current = preference.matches }
+    update(); preference.addEventListener('change', update)
+    return () => preference.removeEventListener('change', update)
+  }, [])
+  useEffect(() => {
+    const perspective = camera instanceof THREE.PerspectiveCamera ? 1 / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) : 1
+    if (shader.current) shader.current.uniforms.uPixelScale.value = size.height * gl.getPixelRatio() * perspective
+  }, [camera, gl, material, size.height])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  useEffect(() => () => armGeometry.dispose(), [armGeometry])
+  useEffect(() => () => material.dispose(), [material])
+  useEffect(() => () => armMaterial.dispose(), [armMaterial])
+  useFrame(({ clock }) => {
+    const activeShader = shader.current
+    if (!activeShader) return
+    activeShader.uniforms.uTime.value = reducedMotion.current ? 0 : clock.elapsedTime
+    activeShader.uniforms.uSelectedNode.value = selectedIndex
+    activeShader.uniforms.uHoveredNode.value = hoveredIndex
+    activeShader.uniforms.uExplorationActive.value = explorationActive ? 1 : 0
+    if (armShader.current) {
+      armShader.current.uniforms.uTime.value = reducedMotion.current ? 0 : clock.elapsedTime
+      armShader.current.uniforms.uExplorationActive.value = explorationActive ? 1 : 0
+    }
+  })
+  return <group raycast={() => null}>
+    <lineSegments geometry={armGeometry} frustumCulled={false} renderOrder={1} raycast={() => null}>
+      <primitive object={armMaterial} ref={armShader} attach="material" />
+    </lineSegments>
+    <points geometry={geometry} frustumCulled={false} renderOrder={1} raycast={() => null}>
+      <primitive object={material} ref={shader} attach="material" />
+    </points>
+  </group>
+}
+
+function StarNodeField({ notes, edges, positions, selectedId, hoveredId, emphasisIds, pathIds, explorationActive }: {
+  notes: GraphNote[]
+  edges: GraphRelationship[]
+  positions: Map<string, [number, number, number]>
+  selectedId: string | null
+  hoveredId: string | null
+  emphasisIds: Set<string> | null
+  pathIds: string[] | null
+  explorationActive: boolean
+}) {
+  const { size, gl, camera } = useThree()
+  const reducedMotion = useRef(false)
+  const shaderMaterial = useRef<THREE.ShaderMaterial>(null)
+  const geometry = useMemo(() => createStarNodeGeometry(notes, positions, edges, emphasisIds, pathIds), [notes, positions, edges, emphasisIds, pathIds])
+  const material = useMemo(() => new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 }, uPixelScale: { value: 1 },
+      uSelectedNode: { value: -1 }, uHoveredNode: { value: -1 },
+      uHasFocus: { value: 0 },
+      uExplorationActive: { value: 0 },
+    },
+    vertexShader: `
+      attribute vec3 aColor;
+      attribute float aSize;
+      attribute float aPhase;
+      attribute float aSpikes;
+      attribute float aEmphasized;
+      attribute float aPath;
+      attribute float aNodeIndex;
+      uniform float uPixelScale;
+      uniform float uSelectedNode;
+      uniform float uHoveredNode;
+      uniform float uHasFocus;
+      uniform float uExplorationActive;
+      varying vec3 vColor;
+      varying float vOpacity;
+      varying float vRotation;
+      varying float vSpikes;
+      varying float vBrightness;
+      void main() {
+        float selected = 1.0 - step(0.5, abs(aNodeIndex - uSelectedNode));
+        float hovered = 1.0 - step(0.5, abs(aNodeIndex - uHoveredNode));
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        float emphasis = max(aEmphasized, max(selected, max(hovered, aPath)));
+        float focusBoost = selected * 0.55 + hovered * 0.3 + aPath * 0.38;
+        float regularVisibility = mix(1.0, mix(0.68, 0.98, emphasis), uHasFocus);
+        float visibility = mix(regularVisibility, mix(0.014, 1.0, emphasis), uExplorationActive);
+        gl_Position = projectionMatrix * viewPosition;
+        gl_PointSize = clamp(aSize * uPixelScale / max(-viewPosition.z, 0.1) * (1.0 + selected * 0.2 + hovered * 0.1), 18.0, 96.0);
+        vColor = mix(aColor, vec3(1.0), min(0.42, 0.12 + focusBoost * 0.22));
+        vOpacity = visibility * (0.94 + focusBoost * 0.06);
+        vRotation = aPhase;
+        vSpikes = aSpikes * (0.82 + selected * 0.55 + hovered * 0.28 + aPath * 0.34);
+        vBrightness = 1.22 + focusBoost * 0.72;
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec3 vColor;
+      varying float vOpacity;
+      varying float vRotation;
+      varying float vSpikes;
+      varying float vBrightness;
+      void main() {
+        vec2 point = (gl_PointCoord - 0.5) * 2.0;
+        float cs = cos(vRotation);
+        float sn = sin(vRotation);
+        vec2 p = mat2(cs, -sn, sn, cs) * point;
+        float radius = length(p);
+        if (radius > 1.0) discard;
+        float core = exp(-radius * radius * 32.0);
+        float photosphere = exp(-radius * radius * 13.0);
+        float innerHalo = exp(-radius * radius * 5.2);
+        float softHalo = exp(-radius * radius * 1.8);
+        float spikeX = exp(-abs(p.y) * 20.0) * exp(-abs(p.x) * 2.35);
+        float spikeY = exp(-abs(p.x) * 20.0) * exp(-abs(p.y) * 2.35);
+        float spikeD1 = exp(-abs(p.x - p.y) * 18.0) * exp(-abs(p.x + p.y) * 3.0);
+        float spikeD2 = exp(-abs(p.x + p.y) * 18.0) * exp(-abs(p.x - p.y) * 3.0);
+        float spikes = max(spikeX, spikeY) + max(spikeD1, spikeD2) * 0.22;
+        float twinkle = 0.96 + 0.04 * sin(uTime * 0.72 + vRotation * 1.7);
+        float alpha = (core * 1.0 + photosphere * 0.48 + innerHalo * 0.31 + softHalo * 0.1 + spikes * vSpikes * 0.18) * vOpacity * twinkle;
+        if (alpha < 0.006) discard;
+        vec3 color = mix(vColor * 0.76, vec3(1.0), core * 0.9);
+        color *= (1.12 + core * 1.24 + photosphere * 0.28 + spikes * vSpikes * 0.24) * vBrightness;
+        gl_FragColor = vec4(color, min(alpha, 1.0));
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    toneMapped: false,
+  }), [])
+  const selectedIndex = useMemo(() => selectedId ? notes.findIndex((note) => note.id === selectedId) : -1, [notes, selectedId])
+  const hoveredIndex = useMemo(() => hoveredId ? notes.findIndex((note) => note.id === hoveredId) : -1, [notes, hoveredId])
+
+  useEffect(() => {
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => { reducedMotion.current = preference.matches }
+    update()
+    preference.addEventListener('change', update)
+    return () => preference.removeEventListener('change', update)
+  }, [])
+  useEffect(() => {
+    const perspective = camera instanceof THREE.PerspectiveCamera ? 1 / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) : 1
+    if (shaderMaterial.current) shaderMaterial.current.uniforms.uPixelScale.value = size.height * gl.getPixelRatio() * perspective
+  }, [camera, gl, material, size.height])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  useEffect(() => () => material.dispose(), [material])
+  useFrame((state) => {
+    const shader = shaderMaterial.current
+    if (!shader) return
+    shader.uniforms.uTime.value = reducedMotion.current ? 0 : state.clock.elapsedTime
+    shader.uniforms.uSelectedNode.value = selectedIndex
+    shader.uniforms.uHoveredNode.value = hoveredIndex
+    shader.uniforms.uHasFocus.value = emphasisIds ? 1 : 0
+    shader.uniforms.uExplorationActive.value = explorationActive ? 1 : 0
+  })
+  return <points geometry={geometry} frustumCulled={false} renderOrder={2} raycast={() => null}>
+    <primitive object={material} ref={shaderMaterial} attach="material" />
+  </points>
 }
 
 function createStarGeometry(count: number, radius: number, seed: number, clustered: boolean) {
@@ -835,20 +1311,44 @@ function CosmicDust() {
       void main() {
         vec3 p = vDirection * 6.0 + vec3(uTime * 0.17, -uTime * 0.11, uTime * 0.08);
         float warp = fbm(p * 0.52 + vec3(8.2, 3.1, 5.7));
-        float broadCloud = smoothstep(0.24, 0.62, fbm(p * 0.38 + vec3(5.4, 2.1, 9.3)));
-        float cloud = smoothstep(0.22, 0.59, fbm(p * 0.86 + vec3(warp * 1.4, -warp * 0.7, warp)));
+        float broadCloud = smoothstep(0.05, 0.46, fbm(p * 0.38 + vec3(5.4, 2.1, 9.3)));
+        float cloud = smoothstep(0.06, 0.48, fbm(p * 0.86 + vec3(warp * 1.4, -warp * 0.7, warp)));
         float filaments = smoothstep(0.34, 0.75, fbm(p * 2.1 + vec3(2.0, 7.0, 1.0)));
         float region = smoothstep(-0.28, 0.2, fbm(vDirection * 2.2 + vec3(4.0, 9.0, 2.0)));
         float viewAngle = 1.0 - dot(normalize(vDirection), normalize(uViewDirection));
         float clearCenter = smoothstep(0.1, 0.42, viewAngle);
         float cloudMass = cloud * (0.42 + broadCloud * 0.9);
-        float opacity = cloudMass * region * clearCenter * (0.022 + filaments * 0.066);
         float warmDust = smoothstep(-0.05, 0.35, warp);
         float coolDust = smoothstep(0.28, 0.55, noise(p * 0.63 + vec3(12.0)));
-        vec3 color = mix(vec3(0.024, 0.036, 0.05), vec3(0.094, 0.076, 0.052), warmDust);
-        color = mix(color, vec3(0.052, 0.064, 0.076), coolDust * 0.62);
-        color = mix(color, vec3(0.084, 0.044, 0.032), coolDust * warmDust * 0.34);
-        gl_FragColor = vec4(color, opacity);
+        float scatteredOpacity = cloudMass * region * clearCenter * (0.1 + filaments * 0.18);
+        float nebulaShape = smoothstep(0.01, 0.2, broadCloud * 0.75 + cloud * 0.8);
+        float nebulaVeil = nebulaShape * (0.32 + filaments * 0.22) * mix(0.55, 1.0, clearCenter);
+
+        // A warped great-circle band gives the deep field a broad, irregular
+        // Milky Way structure while leaving a subdued opening behind the graph.
+        vec3 galacticNormal = normalize(vec3(-0.62, 0.72, -0.16));
+        float bandDist = dot(normalize(vDirection), galacticNormal);
+        float bandWarp = noise(p * 0.31 + vec3(16.0, 4.0, 11.0)) * 0.045;
+        float warpedDist = bandDist + bandWarp;
+        float band = exp(-pow(warpedDist * 4.1, 2.0));
+        float brightLane = exp(-pow(warpedDist * 11.0, 2.0));
+        float bandClouds = smoothstep(0.04, 0.62, fbm(p * 0.42 + vec3(13.0, 6.0, 3.0)));
+        float bandCenterLift = mix(0.42, 1.0, clearCenter);
+        float bandOpacity = band * (0.32 + bandClouds * 0.68) * bandCenterLift * (0.24 + brightLane * 0.24);
+
+        vec3 scatteredColor = mix(vec3(0.028, 0.04, 0.068), vec3(0.12, 0.082, 0.14), warmDust);
+        scatteredColor = mix(scatteredColor, vec3(0.08, 0.105, 0.17), coolDust * 0.7);
+        scatteredColor = mix(scatteredColor, vec3(0.12, 0.058, 0.11), coolDust * warmDust * 0.34);
+        vec3 bandColor = mix(vec3(0.095, 0.13, 0.2), vec3(0.19, 0.23, 0.32), bandClouds * 0.72);
+        float violetDust = smoothstep(0.48, 0.78, noise(p * 0.48 + vec3(7.0, 17.0, 2.0))) * cloudMass;
+        bandColor = mix(bandColor, vec3(0.23, 0.16, 0.29), smoothstep(0.42, 0.78, noise(p * 0.58 + vec3(7.0, 17.0, 2.0))) * 0.64);
+        bandColor = mix(bandColor, vec3(0.2, 0.12, 0.28), violetDust * 0.38);
+        bandColor = mix(bandColor, vec3(0.30, 0.22, 0.13), smoothstep(0.52, 0.8, warmDust) * smoothstep(0.35, 0.8, bandClouds) * 0.42);
+        bandColor += vec3(0.035, 0.04, 0.055) * brightLane;
+        vec3 color = mix(scatteredColor, bandColor, smoothstep(0.06, 0.72, band));
+        vec3 diffuseNebula = mix(vec3(0.105, 0.15, 0.245), vec3(0.2, 0.12, 0.26), warmDust * 0.45 + violetDust * 0.28);
+        color = mix(color, diffuseNebula, nebulaVeil * 0.8);
+        gl_FragColor = vec4(color, max(nebulaVeil, max(scatteredOpacity, bandOpacity)));
       }
     `,
   }), [])
@@ -909,7 +1409,7 @@ function PathPulse({ ids, positions, pulseKey }: { ids: string[]; positions: Map
   })
   return <mesh ref={marker} raycast={() => null}>
     <sphereGeometry args={[0.105, 12, 12]} />
-    <meshBasicMaterial color="#f2d9ff" transparent opacity={0.88} />
+    <meshBasicMaterial color="#bfe5ed" transparent opacity={0.9} />
   </mesh>
 }
 
@@ -928,7 +1428,7 @@ function createPlasmaStrand(from: THREE.Vector3, to: THREE.Vector3, seed: number
   const frequency = 1.2 + random() * 1.7 + strandIndex * 0.28
   const phaseA = random() * Math.PI * 2
   const phaseB = random() * Math.PI * 2
-  const amplitude = strandIndex === 0 ? 0.026 : 0.052 + random() * 0.035
+  const amplitude = strandIndex === 0 ? 0.015 : 0.015
   const controlPoints = Array.from({ length: 11 }, (_, index) => {
     const t = index / 10
     const envelope = Math.pow(Math.sin(Math.PI * t), 0.8)
@@ -956,60 +1456,60 @@ interface VisibleEdge {
   joinsGroup: boolean
 }
 
-const plasmaLayers = [
-  { color: '#bd8742', radius: 0.052, opacity: 0.075 },
-  { color: '#d7b16b', radius: 0.018, opacity: 0.38 },
-  { color: '#f3e4c7', radius: 0.0065, opacity: 0.7 },
-] as const
+interface TubeBuffers { positions: number[]; normals: number[]; indices: number[]; edgeIndices: number[]; pathProgress: number[]; edgeVisibility: number[] }
+interface BeamEmphasis { selected: number; bfs: number; hover: number }
 
-const companionFilaments = [
-  { color: '#d6b577', radius: 0.0045, opacity: 0.2 },
-  { color: '#c6d6dc', radius: 0.0035, opacity: 0.14 },
-] as const
-
-interface TubeBuffers { positions: number[]; indices: number[] }
-
-function appendPlasmaTube(target: TubeBuffers & { edgeIndices: number[] }, curve: THREE.CatmullRomCurve3, radius: number, edgeIndex: number) {
-  const tube = new THREE.TubeGeometry(curve, 96, radius, 8, false)
+function appendPlasmaTube(target: TubeBuffers, curve: THREE.CatmullRomCurve3, radius: number, edgeIndex: number, visibility: number, tubularSegments = 64, radialSegments = 6) {
+  const tube = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegments, false)
   const positions = tube.getAttribute('position').array
+  const normals = tube.getAttribute('normal').array
+  const uv = tube.getAttribute('uv').array
   const indices = tube.getIndex()?.array
   const vertexOffset = target.positions.length / 3
   for (let index = 0; index < positions.length; index += 1) target.positions.push(positions[index])
-  for (let index = 0; index < positions.length / 3; index += 1) target.edgeIndices.push(edgeIndex)
+  for (let index = 0; index < normals.length; index += 1) target.normals.push(normals[index])
+  for (let index = 0; index < positions.length / 3; index += 1) {
+    target.edgeIndices.push(edgeIndex)
+    target.pathProgress.push(uv[index * 2 + 1])
+    target.edgeVisibility.push(visibility)
+  }
   if (indices) for (let index = 0; index < indices.length; index += 1) target.indices.push(indices[index] + vertexOffset)
   tube.dispose()
 }
 
-function PlasmaNetwork({ connections, emphasisByEdge }: {
+function PlasmaNetwork({ connections, emphasisByEdge, traversalEdgeIds, explorationActive }: {
   connections: VisibleEdge[]
-  emphasisByEdge: Map<string, { selected: number; bfs: number }>
+  emphasisByEdge: Map<string, BeamEmphasis>
+  traversalEdgeIds: string[]
+  explorationActive: boolean
 }) {
-  const edgeStates = useRef(new Map<string, { selected: number; bfs: number }>())
+  const edgeStates = useRef(new Map<string, { selected: number; bfs: number; traversal: number; hover: number }>())
   const edgeStateTextureRef = useRef<THREE.DataTexture | null>(null)
+  const traversalStart = useRef<number | null>(null)
+  const reducedMotion = useRef(false)
+  const traversalOrder = useMemo(() => new Map(traversalEdgeIds.map((id, index) => [id, index])), [traversalEdgeIds])
   const geometryData = useMemo(() => {
-    const layerCount = plasmaLayers.length + companionFilaments.length
-    const buffers = Array.from({ length: layerCount }, () => ({ positions: [] as number[], indices: [] as number[], edgeIndices: [] as number[] }))
+    const buffer: TubeBuffers = { positions: [], normals: [], indices: [], edgeIndices: [], pathProgress: [], edgeVisibility: [] }
     const edgeIndices = new Map<string, number>()
     connections.forEach((connection, edgeIndex) => {
       edgeIndices.set(connection.edge.id, edgeIndex)
       const from = new THREE.Vector3(...connection.source)
       const to = new THREE.Vector3(...connection.target)
-      const seed = hashText(connection.edge.id)
-      const mainStrand = createPlasmaStrand(from, to, seed, 0)
-      plasmaLayers.forEach((layer, index) => appendPlasmaTube(buffers[index], mainStrand.curve, layer.radius, edgeIndex))
-      companionFilaments.forEach((layer, index) => {
-        const strand = createPlasmaStrand(from, to, seed, index + 1)
-        appendPlasmaTube(buffers[plasmaLayers.length + index], strand.curve, layer.radius, edgeIndex)
-      })
+      const curve = createPlasmaStrand(from, to, hashText(connection.edge.id), 0).curve
+      // Nearby constellation edges remain legible; long links between clusters
+      // recede into the field while the shader can still emphasize active paths.
+      const distance = from.distanceTo(to)
+      const visibility = THREE.MathUtils.clamp(1.12 - distance * 0.055, 0.6, 0.95)
+      appendPlasmaTube(buffer, curve, 0.0065, edgeIndex, visibility, 96, 4)
     })
-    const geometries = buffers.map((buffer) => {
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(buffer.positions, 3))
-      geometry.setAttribute('aEdgeIndex', new THREE.Float32BufferAttribute(buffer.edgeIndices, 1))
-      if (buffer.indices.length) geometry.setIndex(buffer.indices)
-      return geometry
-    })
-    return { geometries, edgeIndices }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(buffer.positions, 3))
+    geometry.setAttribute('aTubeNormal', new THREE.Float32BufferAttribute(buffer.normals, 3))
+    geometry.setAttribute('aEdgeIndex', new THREE.Float32BufferAttribute(buffer.edgeIndices, 1))
+    geometry.setAttribute('aPathProgress', new THREE.Float32BufferAttribute(buffer.pathProgress, 1))
+    geometry.setAttribute('aEdgeVisibility', new THREE.Float32BufferAttribute(buffer.edgeVisibility, 1))
+    if (buffer.indices.length) geometry.setIndex(buffer.indices)
+    return { geometry, edgeIndices }
   }, [connections])
   const edgeCount = Math.max(1, geometryData.edgeIndices.size)
   const edgeStateTexture = useMemo(() => {
@@ -1024,90 +1524,140 @@ function PlasmaNetwork({ connections, emphasisByEdge }: {
     const liveIds = new Set(connections.map((connection) => connection.edge.id))
     edgeStates.current.forEach((_, id) => { if (!liveIds.has(id)) edgeStates.current.delete(id) })
     connections.forEach((connection) => {
-      if (!edgeStates.current.has(connection.edge.id)) edgeStates.current.set(connection.edge.id, { selected: 0, bfs: 0 })
+      if (!edgeStates.current.has(connection.edge.id)) edgeStates.current.set(connection.edge.id, { selected: 0, bfs: 0, traversal: 0, hover: 0 })
     })
   }, [connections])
   const materials = useMemo(() => {
-    const definitions = [
-      ...plasmaLayers.map((layer) => ({ ...layer, focusColor: layer.color === '#bd8742' ? '#e1aa5c' : layer.color === '#d7b16b' ? '#f2d18a' : '#fff7e5', pathColor: layer.color === '#bd8742' ? '#a8cbd5' : layer.color === '#d7b16b' ? '#e4d6b4' : '#efffff' })),
-      ...companionFilaments.map((layer) => ({ ...layer, focusColor: layer.color === '#d6b577' ? '#e7c786' : '#dce8e9', pathColor: layer.color === '#d6b577' ? '#d9c28f' : '#c4d7db' })),
-    ]
-    return definitions.map((definition) => new THREE.ShaderMaterial({
+    return [new THREE.ShaderMaterial({
       uniforms: {
         uEdgeState: { value: edgeStateTexture },
         uEdgeCount: { value: edgeCount },
-        uBaseColor: { value: new THREE.Color(definition.color) },
-        uSelectedColor: { value: new THREE.Color(definition.focusColor) },
-        uBfsColor: { value: new THREE.Color(definition.pathColor) },
-        uOpacity: { value: definition.opacity },
+        uTime: { value: 0 },
+        uBaseColor: { value: new THREE.Color('#90a6b1') },
+        uSelectedColor: { value: new THREE.Color('#c7efff') },
+        uTraversalColor: { value: new THREE.Color('#d8f7ff') },
+        uBfsColor: { value: new THREE.Color('#f0fbff') },
+        uHoverColor: { value: new THREE.Color('#9dc2d0') },
+        uOpacity: { value: 0.62 },
+        uExplorationActive: { value: explorationActive ? 1 : 0 },
       },
       vertexShader: `
+        uniform sampler2D uEdgeState;
+        uniform float uEdgeCount;
         attribute float aEdgeIndex;
+        attribute float aPathProgress;
+        attribute float aEdgeVisibility;
+        attribute vec3 aTubeNormal;
         varying float vEdgeIndex;
+        varying float vPathProgress;
+        varying float vEdgeVisibility;
         void main() {
+          vec4 state = texture2D(uEdgeState, vec2((aEdgeIndex + 0.5) / uEdgeCount, 0.5));
+          float selected = smoothstep(0.025, 0.86, state.r);
+          float bfs = smoothstep(0.025, 0.86, state.g);
+          float traversal = smoothstep(0.025, 0.86, state.b) * (1.0 - bfs);
+          float hover = smoothstep(0.025, 0.86, state.a) * (1.0 - max(bfs, traversal));
+          selected *= 1.0 - max(bfs, traversal);
+          float activeWidth = max(selected, max(hover, max(traversal, bfs)));
+          vec3 beamPosition = position + aTubeNormal * (activeWidth * 0.0033);
           vEdgeIndex = aEdgeIndex;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          vPathProgress = aPathProgress;
+          vEdgeVisibility = aEdgeVisibility;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(beamPosition, 1.0);
         }
       `,
       fragmentShader: `
         uniform sampler2D uEdgeState;
         uniform float uEdgeCount;
+        uniform float uTime;
         uniform vec3 uBaseColor;
         uniform vec3 uSelectedColor;
+        uniform vec3 uTraversalColor;
         uniform vec3 uBfsColor;
+        uniform vec3 uHoverColor;
         uniform float uOpacity;
+        uniform float uExplorationActive;
         varying float vEdgeIndex;
+        varying float vPathProgress;
+        varying float vEdgeVisibility;
         void main() {
           vec4 state = texture2D(uEdgeState, vec2((vEdgeIndex + 0.5) / uEdgeCount, 0.5));
           float selected = smoothstep(0.025, 0.86, state.r);
           float bfs = smoothstep(0.025, 0.86, state.g);
-          selected *= 1.0 - bfs;
+          float traversal = smoothstep(0.025, 0.86, state.b) * (1.0 - bfs);
+          float hover = smoothstep(0.025, 0.86, state.a) * (1.0 - max(bfs, traversal));
+          selected *= 1.0 - max(bfs, traversal);
           vec3 color = mix(uBaseColor, uSelectedColor, selected);
+          color = mix(color, uTraversalColor, traversal);
           color = mix(color, uBfsColor, bfs);
-          float visibility = 0.18 + selected * 0.76 + bfs * 0.92;
-          float energy = 0.58 + selected * 1.12 + bfs * 1.42;
-          gl_FragColor = vec4(color * energy, uOpacity * visibility);
+          color = mix(color, uHoverColor, hover * 0.55);
+          float focus = max(selected, max(hover, max(traversal, bfs)));
+          float energy = 0.42 + selected * 1.65 + hover * 0.32 + traversal * 1.8 + bfs * 2.0;
+          float idleOpacity = mix(0.56, 0.018, uExplorationActive);
+          float selectedGain = mix(0.16, 0.72, uExplorationActive);
+          float opacity = idleOpacity + selected * selectedGain + hover * 0.08 + traversal * 0.20 + bfs * 0.28;
+          opacity *= mix(vEdgeVisibility, 1.0, focus * 0.82);
+          float quietCurrent = (0.5 + 0.5 * sin(vPathProgress * 12.0 - uTime * 0.5 + vEdgeIndex)) * 0.025;
+          float pulseForward = exp(-pow((vPathProgress - fract(uTime * 0.2 + vEdgeIndex * 0.37)) * 20.0, 2.0));
+          float pulseReverse = exp(-pow((vPathProgress - (1.0 - fract(uTime * 0.2 + vEdgeIndex * 0.61))) * 20.0, 2.0));
+          float flowingPackets = max(pulseForward, pulseReverse) * focus;
+          float activeTrace = (0.5 + 0.5 * sin(vPathProgress * 22.0 - uTime * 1.2 + vEdgeIndex)) * focus * 0.08;
+          gl_FragColor = vec4(color * (energy + quietCurrent + activeTrace + flowingPackets * 1.15), uOpacity * opacity);
           #include <colorspace_fragment>
         }
       `,
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
-      side: THREE.DoubleSide,
       toneMapped: false,
-    }))
-  }, [edgeCount, edgeStateTexture])
-
+    })]
+  }, [edgeCount, edgeStateTexture, explorationActive])
   useEffect(() => () => {
-    geometryData.geometries.forEach((geometry) => geometry.dispose())
+    geometryData.geometry.dispose()
     materials.forEach((material) => material.dispose())
     edgeStateTexture.dispose()
   }, [geometryData, materials, edgeStateTexture])
   useEffect(() => { edgeStateTextureRef.current = edgeStateTexture }, [edgeStateTexture])
 
-  useFrame((_, delta) => {
+  useEffect(() => { traversalStart.current = null }, [traversalEdgeIds])
+  useEffect(() => {
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => { reducedMotion.current = preference.matches }
+    update()
+    preference.addEventListener('change', update)
+    return () => preference.removeEventListener('change', update)
+  }, [])
+  useFrame((state, delta) => {
     const texture = edgeStateTextureRef.current
     if (!texture) return
+    if (traversalEdgeIds.length && traversalStart.current === null) traversalStart.current = state.clock.elapsedTime
+    const elapsed = reducedMotion.current ? Number.POSITIVE_INFINITY : state.clock.elapsedTime - (traversalStart.current ?? state.clock.elapsedTime)
     const stateData = texture.image.data as Uint8Array
+    materials.forEach((material) => { material.uniforms.uTime.value = reducedMotion.current ? 0 : state.clock.elapsedTime })
     for (const connection of connections) {
       const edgeIndex = geometryData.edgeIndices.get(connection.edge.id)
       const edgeState = edgeStates.current.get(connection.edge.id)
       if (edgeIndex === undefined || !edgeState) continue
       const emphasis = emphasisByEdge.get(connection.edge.id)
+      const orderIndex = traversalOrder.get(connection.edge.id)
+      const traversalDelay = orderIndex === undefined ? Number.POSITIVE_INFINITY : orderIndex * 0.12
+      const targetTraversal = orderIndex === undefined ? 0 : reducedMotion.current ? 1 : THREE.MathUtils.clamp((elapsed - traversalDelay) / 0.24, 0, 1)
       const targetSelected = emphasis?.selected ?? 0
       const targetBfs = emphasis?.bfs ?? 0
       edgeState.selected = THREE.MathUtils.damp(edgeState.selected, targetSelected, 5.5, delta)
       edgeState.bfs = THREE.MathUtils.damp(edgeState.bfs, targetBfs, 6.5, delta)
+      edgeState.traversal = THREE.MathUtils.damp(edgeState.traversal, targetTraversal, 7, delta)
+      edgeState.hover = THREE.MathUtils.damp(edgeState.hover, emphasis?.hover ?? 0, 7, delta)
       const offset = edgeIndex * 4
       stateData[offset] = Math.round(edgeState.selected * 255)
       stateData[offset + 1] = Math.round(edgeState.bfs * 255)
+      stateData[offset + 2] = Math.round(edgeState.traversal * 255)
+      stateData[offset + 3] = Math.round(edgeState.hover * 255)
     }
     texture.needsUpdate = true
   })
 
-  return <group raycast={() => null}>
-    {geometryData.geometries.map((geometry, layer) => <mesh key={layer} geometry={geometry} material={materials[layer]} raycast={() => null} />)}
-  </group>
+  return <mesh geometry={geometryData.geometry} material={materials[0]} frustumCulled={false} renderOrder={0} raycast={() => null} />
 }
 
 function samplePath(samples: Float32Array, progress: number, target: THREE.Vector3) {
@@ -1123,9 +1673,10 @@ function samplePath(samples: Float32Array, progress: number, target: THREE.Vecto
   )
 }
 
-function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
+function EnergyFlows({ connections, emphasisByEdge, traversalEdgeIds, arrivals }: {
   connections: VisibleEdge[]
-  emphasisByEdge: Map<string, { selected: number; bfs: number }>
+  emphasisByEdge: Map<string, BeamEmphasis>
+  traversalEdgeIds: string[]
   arrivals: Map<string, number>
 }) {
   const coreMesh = useRef<THREE.InstancedMesh>(null)
@@ -1135,11 +1686,15 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
   const reducedMotion = useRef(false)
   const selectedValues = useRef(new Float32Array(0))
   const bfsValues = useRef(new Float32Array(0))
+  const traversalValues = useRef(new Float32Array(0))
+  const hoverValues = useRef(new Float32Array(0))
+  const traversalStart = useRef<number | null>(null)
+  const traversalOrder = useMemo(() => new Map(traversalEdgeIds.map((id, index) => [id, index])), [traversalEdgeIds])
   const flows = useMemo(() => connections.flatMap((connection) => {
     const seed = hashText(connection.edge.id)
     const from = new THREE.Vector3(...connection.source)
     const to = new THREE.Vector3(...connection.target)
-    const strand = createPlasmaStrand(from, to, seed, 1)
+    const strand = createPlasmaStrand(from, to, seed, 0)
     return [false, true].map((reverse) => ({
       edgeId: connection.edge.id,
       samples: strand.samples,
@@ -1153,12 +1708,15 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
   }), [connections])
   const geometry = useMemo(() => new THREE.SphereGeometry(1, 8, 8), [])
   const coreMaterial = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }), [])
-  const glowMaterial = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }), [])
+  const glowMaterial = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.24, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }), [])
   useEffect(() => () => { geometry.dispose(); coreMaterial.dispose(); glowMaterial.dispose() }, [geometry, coreMaterial, glowMaterial])
   useEffect(() => { lastCycles.current = Array.from({ length: flows.length }, () => -1) }, [flows])
+  useEffect(() => { traversalStart.current = null }, [traversalEdgeIds])
   useEffect(() => {
     selectedValues.current = new Float32Array(flows.length)
     bfsValues.current = new Float32Array(flows.length)
+    traversalValues.current = new Float32Array(flows.length)
+    hoverValues.current = new Float32Array(flows.length)
   }, [flows])
   useEffect(() => {
     const core = coreMesh.current
@@ -1181,6 +1739,8 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
   }, [])
   useFrame((state, delta) => {
     const elapsed = reducedMotion.current ? 0 : state.clock.elapsedTime
+    if (traversalEdgeIds.length && traversalStart.current === null) traversalStart.current = state.clock.elapsedTime
+    const traversalElapsed = state.clock.elapsedTime - (traversalStart.current ?? state.clock.elapsedTime)
     const core = coreMesh.current
     const glow = glowMesh.current
     if (!core || !glow) return
@@ -1189,15 +1749,21 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
       const emphasis = emphasisByEdge.get(flow.edgeId)
       selectedValues.current[flowIndex] = THREE.MathUtils.damp(selectedValues.current[flowIndex], emphasis?.selected ?? 0, 5.5, delta)
       bfsValues.current[flowIndex] = THREE.MathUtils.damp(bfsValues.current[flowIndex], emphasis?.bfs ?? 0, 6.5, delta)
+      const traversalIndex = traversalOrder.get(flow.edgeId)
+      const traversalTarget = traversalIndex === undefined ? 0 : reducedMotion.current ? 1 : THREE.MathUtils.clamp((traversalElapsed - traversalIndex * 0.12) / 0.24, 0, 1)
+      traversalValues.current[flowIndex] = THREE.MathUtils.damp(traversalValues.current[flowIndex], traversalTarget, 7, delta)
+      hoverValues.current[flowIndex] = THREE.MathUtils.damp(hoverValues.current[flowIndex], emphasis?.hover ?? 0, 7, delta)
       const selected = selectedValues.current[flowIndex]
       const bfs = bfsValues.current[flowIndex]
-      const glowEmphasis = selected * 0.78 + bfs
-      pulseColorScratch.copy(idleGlowColor).lerp(activeGlowColor, selected).lerp(pathGlowColor, bfs)
+      const traversal = traversalValues.current[flowIndex]
+      const hover = hoverValues.current[flowIndex]
+      const glowEmphasis = Math.max(selected, traversal, bfs)
+      pulseColorScratch.copy(idleGlowColor).lerp(hoverGlowColor, hover).lerp(activeGlowColor, selected).lerp(traversalGlowColor, traversal).lerp(pathGlowColor, bfs)
       for (let particleIndex = 0; particleIndex < 3; particleIndex += 1) glow.setColorAt(flowIndex * 3 + particleIndex, pulseColorScratch)
-      pulseColorScratch.copy(idlePulseCoreColor).lerp(activePulseCoreColor, selected).lerp(pathPulseCoreColor, bfs)
+      pulseColorScratch.copy(idlePulseCoreColor).lerp(activePulseCoreColor, selected).lerp(traversalPulseCoreColor, traversal).lerp(pathPulseCoreColor, bfs)
       core.setColorAt(flowIndex, pulseColorScratch)
       const cycle = (elapsed * flow.speed + flow.phase) % 1
-      if (!reducedMotion.current && lastCycles.current[flowIndex] < 0.92 && cycle >= 0.92) arrivals.set(flow.targetId, Math.min(elapsed + 0.34, Math.max(arrivals.get(flow.targetId) ?? 0, elapsed + 0.28)))
+      if (!reducedMotion.current && glowEmphasis > 0.35 && lastCycles.current[flowIndex] < 0.92 && cycle >= 0.92) arrivals.set(flow.targetId, Math.min(elapsed + 0.34, Math.max(arrivals.get(flow.targetId) ?? 0, elapsed + 0.28)))
       lastCycles.current[flowIndex] = cycle
       const travel = Math.min(1, cycle / 0.92)
       const progress = flow.reverse ? 1 - travel : travel
@@ -1206,8 +1772,8 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
         samplePath(flow.samples, THREE.MathUtils.clamp(particleProgress, 0, 1), flow.points[particleIndex])
         const inRange = particleProgress >= 0 && particleProgress <= 1
         transform.current.position.copy(flow.points[particleIndex])
-        const glowScale = particleIndex === 0 ? 0.042 : particleIndex === 1 ? 0.029 : 0.018
-        transform.current.scale.setScalar(glowScale * (0.66 + glowEmphasis * 0.5))
+        const glowScale = particleIndex === 0 ? 0.046 : particleIndex === 1 ? 0.032 : 0.021
+        transform.current.scale.setScalar(glowScale * (0.025 + hover * 0.18 + glowEmphasis * 0.92))
         if (particleIndex > 0 && !inRange) transform.current.scale.setScalar(0)
         transform.current.updateMatrix()
         glow.setMatrixAt(flowIndex * 3 + particleIndex, transform.current.matrix)
@@ -1215,7 +1781,7 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
       const headProgress = progress
       samplePath(flow.samples, headProgress, flow.points[0])
       transform.current.position.copy(flow.points[0])
-      transform.current.scale.setScalar(0.018 * (0.66 + glowEmphasis * 0.62))
+      transform.current.scale.setScalar(0.034 * (0.025 + hover * 0.2 + glowEmphasis * 0.96))
       transform.current.updateMatrix()
       core.setMatrixAt(flowIndex, transform.current.matrix)
     }
@@ -1231,16 +1797,59 @@ function EnergyFlows({ connections, emphasisByEdge, arrivals }: {
   </group>
 }
 
-function Scene({ notes, edges, selectedId, hoveredId, highlightIds, pathIds, pathPulseKey, visualEvent, onVisualEventComplete, onSelect, onHover }: GalaxyCanvasProps) {
-  const positions = useMemo(() => createGalaxyLayout(notes), [notes])
+function EndpointRipples({ notes, positions, arrivals }: {
+  notes: GraphNote[]
+  positions: Map<string, [number, number, number]>
+  arrivals: Map<string, number>
+}) {
+  const rippleMesh = useRef<THREE.InstancedMesh>(null)
+  const transform = useMemo(() => new THREE.Object3D(), [])
+  const rippleColor = useMemo(() => new THREE.Color('#d7f8ff'), [])
+  const geometry = useMemo(() => new THREE.TorusGeometry(1, 0.012, 4, 40), [])
+  const material = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.72, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }), [])
+  useEffect(() => () => { geometry.dispose(); material.dispose() }, [geometry, material])
+  useFrame((state) => {
+    const mesh = rippleMesh.current
+    if (!mesh) return
+    const now = state.clock.elapsedTime
+    notes.forEach((note, index) => {
+      const position = positions.get(note.id)
+      const until = arrivals.get(note.id) ?? 0
+      const remaining = THREE.MathUtils.clamp((until - now) / 0.34, 0, 1)
+      if (!position || remaining <= 0) {
+        transform.scale.setScalar(0)
+        rippleColor.set('#000000')
+      } else {
+        const progress = 1 - remaining
+        const seed = hashText(note.id)
+        const sizeVariation = 0.9 + (seed % 201) / 1000
+        const radius = nodeRadius(note.importance) * sizeVariation
+        transform.position.set(...position)
+        transform.rotation.set(Math.PI / 2 + progress * 0.35, progress * 0.2, 0)
+        transform.scale.setScalar(radius * (0.55 + progress * 1.15))
+        rippleColor.set('#d7f8ff').multiplyScalar(remaining * remaining * 1.4)
+      }
+      transform.updateMatrix()
+      mesh.setMatrixAt(index, transform.matrix)
+      mesh.setColorAt(index, rippleColor)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+  })
+  return <instancedMesh ref={rippleMesh} args={[geometry, material, notes.length]} frustumCulled={false} raycast={() => null} />
+}
+
+function Scene({ notes, edges, positions, selectedId, connectionExplorationId, cameraResetKey, cameraCenterKey, cameraCenter, cameraRadius, initialCameraPosition, zoomCommand, onCameraChange, hoveredId, highlightIds, pathIds, traversalIds, pathPulseKey, visualEvent, onVisualEventComplete, onSelect, onHover, frameDistance }: GalaxyCanvasProps & { frameDistance: number; positions: Map<string, [number, number, number]>; cameraCenter: [number, number, number]; cameraRadius: number; initialCameraPosition: [number, number, number] }) {
   const arrivalUntil = useMemo(() => new Map<string, number>(), [])
   const neighbors = useMemo(() => createNeighborMap(notes, edges), [notes, edges])
-  const nodeHaloTexture = useMemo(() => createNodeHaloTexture(), [])
-  useEffect(() => () => nodeHaloTexture.dispose(), [nodeHaloTexture])
   const focus = selectedId ? positions.get(selectedId) ?? null : null
-  const focusId = selectedId ?? hoveredId
+  const focusId = connectionExplorationId ?? selectedId ?? hoveredId
+  const beamFocusId = connectionExplorationId ?? selectedId
   const pathSet = useMemo(() => pathIds ? new Set(pathIds) : null, [pathIds])
-  const filterSet = useMemo(() => pathSet ?? (highlightIds ? new Set(highlightIds) : null), [pathSet, highlightIds])
+  const explorationSet = useMemo(() => connectionExplorationId
+    ? new Set([connectionExplorationId, ...(neighbors.get(connectionExplorationId) ?? [])])
+    : null, [connectionExplorationId, neighbors])
+  const filterSet = useMemo(() => explorationSet ?? pathSet ?? (highlightIds ? new Set(highlightIds) : null), [explorationSet, pathSet, highlightIds])
   const emphasized = useMemo(() => {
     if (!focusId) return null
     return new Set([focusId, ...(neighbors.get(focusId) ?? [])])
@@ -1249,6 +1858,7 @@ function Scene({ notes, edges, selectedId, hoveredId, highlightIds, pathIds, pat
     if (!pathIds || pathIds.length < 2) return new Set<string>()
     return new Set(pathIds.slice(0, -1).map((id, index) => [id, pathIds[index + 1]].sort().join('\u0000')))
   }, [pathIds])
+  const traversalEdgeIds = useMemo(() => traversalIds ? deriveTraversalEdgeIds(traversalIds, edges) : [], [traversalIds, edges])
   const visibleEdges = useMemo(() => edges.flatMap((edge) => {
     const source = positions.get(edge.sourceNoteId)
     const target = positions.get(edge.targetNoteId)
@@ -1256,9 +1866,9 @@ function Scene({ notes, edges, selectedId, hoveredId, highlightIds, pathIds, pat
     const pathEdge = Boolean(pathSet && pathEdgeKeys.has([edge.sourceNoteId, edge.targetNoteId].sort().join('\u0000')))
     const joinsGroup = Boolean(!pathSet && highlightIds?.includes(edge.sourceNoteId) && highlightIds.includes(edge.targetNoteId))
     const focusEdge = Boolean(focusId && (edge.sourceNoteId === focusId || edge.targetNoteId === focusId))
-    const activeBeam = Boolean(selectedId && !pathEdge && (edge.sourceNoteId === selectedId || edge.targetNoteId === selectedId))
+    const activeBeam = Boolean(beamFocusId && !pathEdge && (edge.sourceNoteId === beamFocusId || edge.targetNoteId === beamFocusId))
     return [{ edge, source, target, pathEdge, activeBeam, focusEdge, joinsGroup }]
-  }), [edges, positions, pathSet, pathEdgeKeys, highlightIds, focusId, selectedId])
+  }), [edges, positions, pathSet, pathEdgeKeys, highlightIds, focusId, beamFocusId])
   const beamConnections = useMemo(() => edges.flatMap((edge) => {
     const source = positions.get(edge.sourceNoteId)
     const target = positions.get(edge.targetNoteId)
@@ -1266,9 +1876,16 @@ function Scene({ notes, edges, selectedId, hoveredId, highlightIds, pathIds, pat
   }), [edges, positions])
   const hasActiveBfsPath = pathEdgeKeys.size > 0
   const beamEmphasis = useMemo(() => new Map(visibleEdges.map((connection) => [connection.edge.id, {
-    selected: !hasActiveBfsPath && connection.activeBeam ? 1 : 0,
+    selected: !hasActiveBfsPath && traversalEdgeIds.length === 0 && connection.activeBeam ? 1 : 0,
     bfs: connection.pathEdge ? 1 : 0,
-  }])), [visibleEdges, hasActiveBfsPath])
+    traversal: 0,
+    hover: !connectionExplorationId && !hasActiveBfsPath && traversalEdgeIds.length === 0 && hoveredId && (connection.edge.sourceNoteId === hoveredId || connection.edge.targetNoteId === hoveredId) ? 1 : 0,
+  }])), [visibleEdges, hasActiveBfsPath, traversalEdgeIds, hoveredId, connectionExplorationId])
+  const traversalEdgeSet = useMemo(() => new Set(traversalEdgeIds), [traversalEdgeIds])
+  const activeBeamConnections = useMemo(() => beamConnections.filter((connection) => {
+    const state = beamEmphasis.get(connection.edge.id)
+    return traversalEdgeSet.has(connection.edge.id) || Boolean(state && (state.selected > 0 || state.bfs > 0 || state.hover > 0))
+  }), [beamConnections, beamEmphasis, traversalEdgeSet])
   const pathPoints = pathIds?.map((id) => positions.get(id)).filter((point): point is [number, number, number] => Boolean(point)) ?? []
   const mutationPosition = visualEvent?.kind === 'delete'
     ? visualEvent.position
@@ -1283,32 +1900,63 @@ function Scene({ notes, edges, selectedId, hoveredId, highlightIds, pathIds, pat
     <fog attach="fog" args={['#030507', 36, 78]} />
     <ambientLight intensity={0.58} color="#b7b2a7" />
     <directionalLight position={[7, 10, 8]} intensity={0.48} color="#dfc69b" />
+    <Environment resolution={64} frames={1}>
+      <Lightformer form="rect" intensity={1.65} color="#ffffff" scale={[4, 2, 1]} position={[0, 5, 6]} />
+      <Lightformer form="rect" intensity={1.1} color="#b9dce4" scale={[3, 1, 1]} position={[-5, 1, -3]} rotation={[0, Math.PI / 2, 0]} />
+      <Lightformer form="rect" intensity={0.9} color="#d9e5e6" scale={[2, 3, 1]} position={[4, -2, 2]} rotation={[0, -0.8, 0.3]} />
+    </Environment>
     <CosmicDust />
     <StarField />
     <DeepField />
     <DistantGalaxyField />
     <group>
-      <PlasmaNetwork connections={beamConnections} emphasisByEdge={beamEmphasis} />
-      <EnergyFlows connections={beamConnections} emphasisByEdge={beamEmphasis} arrivals={arrivalUntil} />
+      <PlasmaNetwork connections={beamConnections} emphasisByEdge={beamEmphasis} traversalEdgeIds={traversalEdgeIds} explorationActive={Boolean(connectionExplorationId)} />
+      <EnergyFlows connections={activeBeamConnections} emphasisByEdge={beamEmphasis} traversalEdgeIds={traversalEdgeIds} arrivals={arrivalUntil} />
+      <EndpointRipples notes={notes} positions={positions} arrivals={arrivalUntil} />
       {pathPoints.length > 0 && <PathPulse key={pathPulseKey} ids={pathIds ?? []} positions={positions} pulseKey={pathPulseKey} />}
     </group>
+    <NodeGalaxyParticles notes={notes} positions={positions} selectedId={selectedId} hoveredId={hoveredId} emphasisIds={filterSet ?? emphasized} explorationActive={Boolean(connectionExplorationId)} />
+    <StarNodeField notes={notes} edges={edges} positions={positions} selectedId={selectedId} hoveredId={hoveredId} emphasisIds={filterSet ?? emphasized} pathIds={pathIds} explorationActive={Boolean(connectionExplorationId)} />
     {notes.map((note) => {
       const position = positions.get(note.id)
       if (!position) return null
       const focused = filterSet ?? emphasized
       const active = Boolean(focused?.has(note.id))
-      const prominent = note.importance >= 92 || (neighbors.get(note.id)?.size ?? 0) >= 5
-      return <NoteNode key={note.id} note={note} position={position} active={active} dimmed={Boolean(focused && !active)} hovered={note.id === hoveredId} selected={note.id === selectedId} prominent={prominent} onPath={Boolean(pathSet?.has(note.id))} haloTexture={nodeHaloTexture} arrivalUntil={arrivalUntil} onSelect={() => onSelect(note)} onHover={onHover} />
+      return <NoteNode key={note.id} note={note} position={position} active={active} hovered={note.id === hoveredId} selected={note.id === selectedId} onPath={Boolean(pathSet?.has(note.id))} focusEmphasis={Boolean(connectionExplorationId && filterSet?.has(note.id))} onSelect={() => onSelect(note)} onHover={onHover} />
     })}
     {visualEvent && mutationPosition && mutationEdgeExists && (visualEvent.kind !== 'relationship' || mutationTarget) && <GraphMutationEffect
       key={visualEvent.key} event={visualEvent} position={mutationPosition} target={mutationTarget}
       onComplete={onVisualEventComplete} />}
-    <CameraFocus focus={focus as [number, number, number] | null} />
+    <CameraFocus focus={focus as [number, number, number] | null} explorationActive={Boolean(connectionExplorationId)} resetKey={cameraResetKey} centerKey={cameraCenterKey} centerTarget={cameraCenter} centerRadius={cameraRadius} initialCameraPosition={initialCameraPosition} zoomCommand={zoomCommand} onCameraChange={onCameraChange} frameDistance={frameDistance} />
   </>
 }
 
-export function GalaxyCanvas(props: GalaxyCanvasProps) {
-  return <Canvas camera={{ position: [0, 4, 18], fov: 48 }} dpr={[1, 1.6]} gl={{ antialias: true, alpha: false }} onPointerMissed={() => props.onHover(null)}>
-    <Scene {...props} />
+export const GalaxyCanvas = memo(function GalaxyCanvas(props: GalaxyCanvasProps) {
+  const positions = useMemo(() => createGalaxyLayout(props.notes, props.edges), [props.notes, props.edges])
+  const graphFrame = useMemo(() => {
+    if (!positions.size) return { center: [0, 0, 0] as [number, number, number], radius: 1 }
+    const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity }
+    positions.forEach(([x, y, z]) => {
+      bounds.minX = Math.min(bounds.minX, x); bounds.maxX = Math.max(bounds.maxX, x)
+      bounds.minY = Math.min(bounds.minY, y); bounds.maxY = Math.max(bounds.maxY, y)
+      bounds.minZ = Math.min(bounds.minZ, z); bounds.maxZ = Math.max(bounds.maxZ, z)
+    })
+    const center: [number, number, number] = [
+      (bounds.minX + bounds.maxX) / 2,
+      (bounds.minY + bounds.maxY) / 2,
+      (bounds.minZ + bounds.maxZ) / 2,
+    ]
+    let radius = 0
+    positions.forEach(([x, y, z]) => { radius = Math.max(radius, Math.hypot(x - center[0], y - center[1], z - center[2])) })
+    return { center, radius: Math.max(1, radius) }
+  }, [positions])
+  const frameDistance = useMemo(() => {
+    let radius = 0
+    positions.forEach(([x, y, z]) => { radius = Math.max(radius, Math.hypot(x, y, z)) })
+    return Math.max(18, radius * 1.78)
+  }, [positions])
+  const initialCameraPosition = useMemo<[number, number, number]>(() => [0, frameDistance * 0.22, frameDistance], [frameDistance])
+  return <Canvas camera={{ position: initialCameraPosition, fov: 48 }} dpr={[1, 1.6]} gl={{ antialias: true, alpha: false }} onPointerMissed={() => { props.onHover(null); props.onBackgroundClick() }}>
+    <Scene {...props} positions={positions} frameDistance={frameDistance} cameraCenter={graphFrame.center} cameraRadius={graphFrame.radius} initialCameraPosition={initialCameraPosition} />
   </Canvas>
-}
+})

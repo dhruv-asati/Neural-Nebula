@@ -25,6 +25,20 @@ export interface KnowledgeGraph {
   edges: GraphRelationship[]
 }
 
+export interface GalaxyCameraSnapshot {
+  x: number
+  z: number
+  distance: number
+  position: [number, number, number]
+  forward: [number, number, number]
+  right: [number, number, number]
+  up: [number, number, number]
+  target: [number, number, number]
+  fov: number
+  aspect: number
+  near: number
+}
+
 export interface SearchSuggestions {
   autocomplete: string[]
   corrections: Array<{ term: string; distance: number }>
@@ -41,6 +55,7 @@ export interface GraphPath {
 export interface SimilaritySuggestion {
   noteId: string
   similarity: number
+  reason?: string
 }
 
 export interface TraversalResult {

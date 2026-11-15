@@ -9,7 +9,7 @@ import { Hud } from './components/Hud'
 import { CommandPalette, type PaletteAction } from './components/CommandPalette'
 import { createGalaxyLayout } from './galaxy/layout'
 import type {
-  CommunitiesResult, ComponentsResult, GraphNote, GraphPath, HistoryStatus, KnowledgeGraph, LearningOrder,
+  CommunitiesResult, ComponentsResult, GalaxyCameraSnapshot, GraphNote, GraphPath, HistoryStatus, KnowledgeGraph, LearningOrder,
   Prerequisite, SearchSuggestions, SimilaritySuggestion, TraversalResult,
 } from './types'
 import './App.css'
@@ -27,7 +27,17 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
   const [status, setStatus] = useState<LoadStatus>('loading')
   const [error, setError] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [connectionExplorationId, setConnectionExplorationId] = useState<string | null>(null)
   const [controlPanelOpen, setControlPanelOpen] = useState(false)
+  const [cameraResetKey, setCameraResetKey] = useState(0)
+  const [cameraCenterKey, setCameraCenterKey] = useState(0)
+  const [zoomCommand, setZoomCommand] = useState<{ key: number; direction: -1 | 1 }>({ key: 0, direction: 1 })
+  const [cameraSnapshot, setCameraSnapshot] = useState<GalaxyCameraSnapshot>({
+    x: 0, z: 0, distance: 18.5, position: [0, 4, 18], forward: [0, -0.217, -0.976],
+    right: [1, 0, 0], up: [0, 0.976, -0.217], target: [0, 0, 0], fov: 48, aspect: 16 / 9, near: 0.1,
+  })
+  const [focusMode, setFocusMode] = useState(false)
+  const [fullscreen, setFullscreen] = useState(Boolean(document.fullscreenElement))
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [graphRevision, setGraphRevision] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
@@ -96,12 +106,16 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     selectedIdRef.current = selectedId
     graphRevisionRef.current = graphRevision
   }, [graphRevision, selectedId])
-  const selectedPosition = useMemo(() => selectedId && graph ? createGalaxyLayout(graph.nodes).get(selectedId) : undefined, [graph, selectedId])
+  const layoutPositions = useMemo(() => graph ? createGalaxyLayout(graph.nodes, graph.edges) : new Map(), [graph])
+  const selectedPosition = useMemo(() => selectedId ? layoutPositions.get(selectedId) : undefined, [layoutPositions, selectedId])
   const selectedDraft = useMemo(() => selected ? (editDraft?.id === selected.id ? editDraft : {
     id: selected.id, title: selected.title, content: selected.content, type: selected.type,
     importance: selected.importance, tags: selected.tags.join(', '),
   }) : null, [editDraft, selected])
   const pathIds = pathResult?.pathExists ? pathResult.path : null
+  const dfsTraversalIds = dfsResult && highlightIds === dfsResult.visitedNoteIds && (selectedId === null
+    ? dfsStartId === graph?.nodes[0]?.id
+    : dfsStartId === selectedId) ? dfsResult.visitedNoteIds : null
   const clearPathVisualization = useCallback(() => {
     pathRequestRef.current += 1
     setPathBusy(false)
@@ -109,6 +123,10 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     setHighlightIds(null)
     setPathError('')
   }, [])
+  const clearExploration = useCallback(() => {
+    clearPathVisualization()
+    setConnectionExplorationId(null)
+  }, [clearPathVisualization])
 
   const openPalette = useCallback(() => {
     if (paletteOpen) return
@@ -122,9 +140,23 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
       if (opener?.isConnected) opener.focus({ preventScroll: true })
     })
   }, [])
+  const closeSelectedNote = useCallback(() => setSelectedId(null), [])
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.isComposing && !event.defaultPrevented) {
+        const target = event.target instanceof HTMLElement ? event.target : null
+        const editingTarget = Boolean(target && (target.isContentEditable || target.closest('input, textarea, select, [contenteditable="true"]')))
+        const modalOpen = Boolean(document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]'))
+        if (modalOpen || editDraft || editingTarget) return
+        if (connectionExplorationId !== null) {
+          event.preventDefault()
+          clearExploration()
+          return
+        }
+        if (selectedId !== null) { event.preventDefault(); closeSelectedNote() }
+        return
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && !event.repeat && !event.isComposing) {
         event.preventDefault()
         if (paletteOpen) closePalette(true)
@@ -133,13 +165,14 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [closePalette, openPalette, paletteOpen])
+  }, [clearExploration, closePalette, closeSelectedNote, connectionExplorationId, editDraft, openPalette, paletteOpen, selectedId])
 
   useEffect(() => {
     const controller = new AbortController()
     fetchGraph(controller.signal).then((data) => {
       setGraph(data)
       setSelectedId((current) => current && data.nodes.some((note) => note.id === current) ? current : null)
+      setConnectionExplorationId((current) => current && data.nodes.some((note) => note.id === current) ? current : null)
       setPathFrom((current) => current || data.nodes[0]?.id || '')
       setPathTo((current) => current || data.nodes[1]?.id || data.nodes[0]?.id || '')
       setStatus('ready')
@@ -219,13 +252,16 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
   }, [clearPathVisualization, query])
   const selectNode = useCallback((note: GraphNote) => {
     if (note.id !== selectedId) clearPathVisualization()
-    setSelectedId(note.id); setHoveredId(null)
+    setSelectedId(note.id); setHoveredId(null); setControlPanelOpen(false)
+    setConnectionExplorationId((current) => current ? note.id : null)
   }, [clearPathVisualization, selectedId])
   const selectSearchResult = useCallback((note: GraphNote) => {
     clearPathVisualization(); setSelectedId(note.id); setHoveredId(null)
+    setConnectionExplorationId((current) => current ? note.id : null)
   }, [clearPathVisualization])
   const focusStandaloneNote = useCallback((note: GraphNote) => {
     clearPathVisualization(); setSelectedId(note.id); setHoveredId(null)
+    setConnectionExplorationId((current) => current ? note.id : null)
   }, [clearPathVisualization])
   const selectPaletteNote = useCallback((note: GraphNote) => {
     const current = graph?.nodes.find((item) => item.id === note.id)
@@ -237,6 +273,7 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     selectSearchResult(current)
   }, [graph, refreshGraph, selectSearchResult])
   const runPath = useCallback(async () => {
+    clearExploration()
     const requestId = ++pathRequestRef.current
     setPathBusy(true); setPathError(''); setPathResult(null); setHighlightIds(null)
     try {
@@ -250,12 +287,16 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     } finally {
       if (pathRequestRef.current === requestId) setPathBusy(false)
     }
-  }, [pathFrom, pathTo])
-  const clearExploration = clearPathVisualization
+  }, [clearExploration, pathFrom, pathTo])
+  const exploreSelectedConnections = useCallback(() => {
+    if (!selectedId) return
+    clearPathVisualization()
+    setConnectionExplorationId(selectedId)
+  }, [clearPathVisualization, selectedId])
   const runDfs = useCallback(async () => {
     const start = selectedId ?? graph?.nodes[0]?.id
     if (!start) return
-    clearPathVisualization()
+    clearExploration()
     if (dfsRef.current) dfsRef.current.open = true
     const selectionAtRequest = selectedId
     const revisionAtRequest = graphRevision
@@ -270,7 +311,7 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     } finally {
       if (selectedIdRef.current === selectionAtRequest && graphRevisionRef.current === revisionAtRequest) setDfsRequest(null)
     }
-  }, [clearPathVisualization, graph, graphRevision, selectedId])
+  }, [clearExploration, graph, graphRevision, selectedId])
 
   const mutate = useCallback(async (operation: () => Promise<unknown>, success: string, clearSelection = false, expectation?: MutationExpectation) => {
     setBusy(true); setFeedback(''); setVisualEvent(null)
@@ -334,6 +375,20 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
       target?.focus({ preventScroll: true })
     }, 80)
   }, [])
+  const openSection = useCallback((section: HTMLDetailsElement | null, focusId?: string) => {
+    setFocusMode(false)
+    setControlPanelOpen(true)
+    window.setTimeout(() => focusSection(section, focusId), 60)
+  }, [focusSection])
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) void document.exitFullscreen()
+    else void document.documentElement.requestFullscreen?.()
+  }, [])
+  useEffect(() => {
+    const syncFullscreen = () => setFullscreen(Boolean(document.fullscreenElement))
+    document.addEventListener('fullscreenchange', syncFullscreen)
+    return () => document.removeEventListener('fullscreenchange', syncFullscreen)
+  }, [])
 
   const paletteActions = useMemo<PaletteAction[]>(() => [
     { id: 'return-galaxy', group: 'Navigation', title: 'Return to galaxy', detail: 'Clear selection and restore the overview', keywords: 'home overview deselect galaxy', run: () => { setSelectedId(null); setHoveredId(null); clearExploration() } },
@@ -352,7 +407,7 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     { id: 'redo', group: 'Actions', title: 'Redo', detail: history?.nextRedoAction ?? 'Nothing to redo', keywords: 'redo history repeat', disabled: busy || !history?.canRedo, run: () => { void runHistory('redo') } },
   ], [busy, clearExploration, focusSection, focusStandaloneNote, graph?.nodes.length, history?.canRedo, history?.canUndo, history?.nextRedoAction, history?.nextUndoAction, runDfs, runHistory, selected])
 
-  const onChooseGroup = (ids: string[]) => { clearPathVisualization(); setHighlightIds(ids); setSelectedId(null) }
+  const onChooseGroup = (ids: string[]) => { clearExploration(); setHighlightIds(ids); setSelectedId(null) }
   const noteName = (id: string) => graph?.nodes.find((note) => note.id === id)?.title ?? id
   const visibleRelationship = useMemo(() => graph?.edges.filter((edge) => edge.sourceNoteId === selectedId || edge.targetNoteId === selectedId) ?? [], [graph, selectedId])
   const directNeighborIds = useMemo(() => new Set(visibleRelationship.map((edge) => edge.sourceNoteId === selectedId ? edge.targetNoteId : edge.sourceNoteId)), [selectedId, visibleRelationship])
@@ -368,35 +423,35 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
     void mutate(() => createRelationship(selectedId, targetId), 'Suggested relationship created.', false, { kind: 'relationship', sourceId: selectedId, targetId })
   }, [directNeighborIds, mutate, selectedId])
 
-  return <main className={`app-shell${entering ? ' app-shell--route-enter' : ''}`}>
+  const navigateDock = (section: 'explore' | 'organize' | 'learn' | 'analyze') => {
+    if (section === 'explore') { setControlPanelOpen(false); setSelectedId(null); clearExploration(); return }
+    if (section === 'organize') openSection(manageRef.current, 'new-note-title')
+    if (section === 'learn') openSection(learningTrailRef.current)
+    if (section === 'analyze') openSection(inspectorRef.current)
+  }
+  const handleVisualEventComplete = useCallback((key: number) => {
+    setVisualEvent((current) => current?.key === key ? null : current)
+  }, [])
+  const handleCanvasBackgroundClick = useCallback(() => setControlPanelOpen(false), [])
+
+  return <main className={`app-shell${entering ? ' app-shell--route-enter' : ''}${focusMode ? ' app-shell--focus-mode' : ''}`}>
     <div className="scene-wash" aria-hidden="true" />
     {graph && graph.nodes.length > 0 && <div className="canvas-wrap" aria-label="Interactive 3D knowledge galaxy">
       <Suspense fallback={<div className="canvas-loading" role="status">Initializing the 3D galaxy…</div>}>
-        <GalaxyCanvas notes={graph.nodes} edges={graph.edges} selectedId={selectedId} hoveredId={hoveredId} visualEvent={visualEvent}
-          onVisualEventComplete={(key) => setVisualEvent((current) => current?.key === key ? null : current)}
-          highlightIds={highlightIds} pathIds={pathIds} pathPulseKey={pathPulseKey}
-          onSelect={selectNode} onHover={setHoveredId} />
+        <GalaxyCanvas notes={graph.nodes} edges={graph.edges} selectedId={selectedId} connectionExplorationId={connectionExplorationId} cameraResetKey={cameraResetKey} cameraCenterKey={cameraCenterKey} zoomCommand={zoomCommand} onCameraChange={setCameraSnapshot} hoveredId={hoveredId} visualEvent={visualEvent}
+          onVisualEventComplete={handleVisualEventComplete}
+          highlightIds={highlightIds} pathIds={pathIds} traversalIds={dfsTraversalIds} pathPulseKey={pathPulseKey}
+          onSelect={selectNode} onHover={setHoveredId} onBackgroundClick={handleCanvasBackgroundClick} />
       </Suspense>
     </div>}
-    <Hud count={graph?.nodes.length ?? 0} status={status} selected={selected} onDeselect={() => setSelectedId(null)} onHome={onHome} />
+    <Hud count={graph?.nodes.length ?? 0} status={status} selected={connectionExplorationId ? null : selected} connectionExplorationFocus={connectionExplorationId ? graph?.nodes.find((note) => note.id === connectionExplorationId) ?? null : null} notes={graph?.nodes ?? []} edges={graph?.edges ?? []} positions={layoutPositions}
+      related={relatedForSelection} camera={cameraSnapshot} panelOpen={controlPanelOpen} focusMode={focusMode} fullscreen={fullscreen}
+      onDeselect={closeSelectedNote} onHome={onHome} onResetCamera={() => setCameraResetKey((value) => value + 1)} onSearch={openPalette}
+      onTogglePanel={() => { setFocusMode(false); setControlPanelOpen((open) => !open) }} onZoom={(direction) => setZoomCommand((current) => ({ key: current.key + 1, direction }))}
+      onCenterGraph={() => setCameraCenterKey((value) => value + 1)}
+      onFocusMode={() => setFocusMode((value) => !value)} onFullscreen={toggleFullscreen}
+      onSelectNote={(note) => selectNode(note)} onExploreConnections={exploreSelectedConnections} onExitConnectionExploration={clearExploration} onNavigate={navigateDock} />
     {paletteOpen && <CommandPalette actions={paletteActions} selected={selected} onSelectNote={selectPaletteNote} onClose={closePalette} />}
-
-    <button
-      className={`panel-toggle${controlPanelOpen ? ' panel-toggle--open' : ''}`}
-      type="button"
-      aria-label={controlPanelOpen ? 'Close control panel' : 'Open control panel'}
-      aria-controls="knowledge-explorer-panel"
-      aria-expanded={controlPanelOpen}
-      title={controlPanelOpen ? 'Close control panel' : 'Open control panel'}
-      onClick={() => setControlPanelOpen((open) => !open)}
-    >
-      <svg viewBox="0 0 36 36" aria-hidden="true">
-        <rect x="5.5" y="9" width="18" height="21" rx="2.2" className="panel-toggle__panel-back" />
-        <rect x="10.5" y="6" width="19" height="23" rx="2.4" className="panel-toggle__panel-front" />
-        <path d="M15 13h10M15 17.5h10M15 22h6" className="panel-toggle__lines" />
-        <path d="m28.2 3.8.95 2.7 2.7.95-2.7.95-.95 2.7-.95-2.7-2.7-.95 2.7-.95z" className="panel-toggle__spark" />
-      </svg>
-    </button>
 
     <aside
       id="knowledge-explorer-panel"
@@ -439,7 +494,7 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
             {relatedLoadingForSelection && <small className="muted" role="status">Finding related concepts…</small>}
             {relatedErrorForSelection && <p className="console-error" role="alert">{relatedErrorForSelection}</p>}
             {!relatedLoadingForSelection && !relatedErrorForSelection && relatedForSelection.length === 0 && <small className="muted">No related concepts meet the backend suggestion threshold.</small>}
-            {relatedForSelection.length > 0 && <div className="console-list">{relatedForSelection.map(({ noteId, similarity }) => {
+            {relatedForSelection.length > 0 && <div className="console-list">{relatedForSelection.map(({ noteId, similarity, reason }) => {
               const note = graph?.nodes.find((item) => item.id === noteId)
               if (!note) return null
               const connected = directNeighborIds.has(noteId)
@@ -447,8 +502,8 @@ function GalaxyExplorerApp({ onHome, entering }: { onHome: () => void; entering:
                 (edge.sourceNoteId === selected.id && edge.targetNoteId === noteId) ||
                 (edge.sourceNoteId === noteId && edge.targetNoteId === selected.id)) : undefined
               return <div className="discovery-row" key={noteId}>
-                <button className="console-row discovery-note" onClick={() => focusStandaloneNote(note)}><span>{note.title}<small>{note.type}{note.tags.length ? ' · ' + note.tags.join(', ') : ''}</small></span><small>{(similarity * 100).toFixed(0)}% · {connected ? 'Connected' : 'Suggested'}</small></button>
-                {connected ? <div className="relationship-actions"><small className="relationship-status">Existing relationship</small>{relationship && <button className="relationship-remove" disabled={busy} aria-label={`Remove relationship between ${selected.title} and ${note.title}`} onClick={() => void mutate(() => deleteRelationshipRequest(relationship.id), 'Relationship removed.')}>Remove link</button>}</div> : <button className="connect-suggestion" disabled={busy} onClick={() => connectSuggestion(noteId)}>Connect</button>}
+                <button className="console-row discovery-note" onClick={() => focusStandaloneNote(note)}><span>{note.title}<small>{note.type}{note.tags.length ? ' · ' + note.tags.join(', ') : ''}</small>{reason && <small className="discovery-reason">{reason}</small>}</span><small>{(similarity * 100).toFixed(0)}% · {connected ? 'Connected' : 'Suggested'}</small></button>
+                {connected ? <div className="relationship-actions"><small className="relationship-status">{relationship?.origin === 'AUTOMATIC' ? `Automatic · ${Math.round((relationship.similarityScore ?? similarity) * 100)}% match` : 'Existing relationship'}</small>{relationship && <button className="relationship-remove" disabled={busy} aria-label={`Remove relationship between ${selected.title} and ${note.title}`} onClick={() => void mutate(() => deleteRelationshipRequest(relationship.id), 'Relationship removed.')}>Remove link</button>}</div> : <button className="connect-suggestion" disabled={busy} onClick={() => connectSuggestion(noteId)}>Connect</button>}
               </div>
             })}</div>}
           </>}

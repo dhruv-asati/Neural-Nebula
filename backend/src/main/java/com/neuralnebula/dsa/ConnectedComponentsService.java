@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.TreeSet;
 
 /** Rebuilds Union-Find per query so arbitrary graph edge deletions cannot leave stale components. */
 public final class ConnectedComponentsService {

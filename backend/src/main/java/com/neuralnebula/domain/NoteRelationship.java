@@ -20,10 +20,10 @@ public record NoteRelationship(
         }
         type = Objects.requireNonNull(type, "type cannot be null");
         origin = Objects.requireNonNull(origin, "origin cannot be null");
-        if (origin == RelationshipOrigin.SUGGESTED) {
+        if (origin == RelationshipOrigin.SUGGESTED || origin == RelationshipOrigin.AUTOMATIC) {
             if (similarityScore == null || !Double.isFinite(similarityScore)
                     || similarityScore < 0.0 || similarityScore > 1.0) {
-                throw new IllegalArgumentException("suggested relationships require a similarity score from 0 to 1");
+                throw new IllegalArgumentException("similarity-based relationships require a score from 0 to 1");
             }
         } else if (similarityScore != null) {
             throw new IllegalArgumentException("manual relationships do not have a similarity score");

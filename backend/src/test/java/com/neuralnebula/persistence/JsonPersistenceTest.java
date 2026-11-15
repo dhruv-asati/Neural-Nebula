@@ -5,7 +5,6 @@ import com.neuralnebula.domain.NoteRelationship;
 import com.neuralnebula.domain.NoteType;
 import com.neuralnebula.domain.RelationshipOrigin;
 import com.neuralnebula.domain.RelationshipType;
-import com.neuralnebula.dsa.KeywordIndex;
 import com.neuralnebula.service.KnowledgeService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

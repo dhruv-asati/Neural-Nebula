@@ -1,8 +1,6 @@
 package com.neuralnebula.dsa;
 
 import com.neuralnebula.domain.Note;
-
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;

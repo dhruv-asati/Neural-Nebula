@@ -39,6 +39,9 @@ import java.util.stream.Collectors;
 /** Application operations and transactional publication of persisted canonical state. */
 @Service
 public final class KnowledgeService {
+    private static final double AUTOMATIC_RELATIONSHIP_THRESHOLD = 0.62;
+    private static final double SUGGESTION_RELATIONSHIP_THRESHOLD = 0.28;
+
     public record GraphData(List<Note> notes, List<NoteRelationship> relationships) { }
     public record SearchSuggestions(List<String> autocomplete, List<EditDistance.Correction> corrections) { }
     public record HistoryStatus(boolean canUndo, boolean canRedo, int undoCount, int redoCount,
@@ -89,7 +92,8 @@ public final class KnowledgeService {
         Note note = new Note(UUID.randomUUID().toString(), title, content, tags, type, importance, now, now);
         List<Note> candidateNotes = new ArrayList<>(state.data().notes());
         candidateNotes.add(note);
-        commitMutation(candidate(candidateNotes, state.data().relationships(), state.data().prerequisites()),
+        List<NoteRelationship> links = updateAutomaticRelationships(note, false);
+        commitMutation(candidate(candidateNotes, links, state.data().prerequisites()),
                 "Create note " + note.id());
         return note;
     }
@@ -103,7 +107,8 @@ public final class KnowledgeService {
         Note updated = new Note(id, title, content, tags, type, importance, existing.createdAt(), Instant.now());
         List<Note> candidateNotes = state.data().notes().stream()
                 .map(note -> note.id().equals(id) ? updated : note).toList();
-        commitMutation(candidate(candidateNotes, state.data().relationships(), state.data().prerequisites()),
+        List<NoteRelationship> links = updateAutomaticRelationships(updated, true);
+        commitMutation(candidate(candidateNotes, links, state.data().prerequisites()),
                 "Update note " + id);
         return updated;
     }
@@ -198,8 +203,54 @@ public final class KnowledgeService {
     }
 
     public synchronized List<SimilarityService.Suggestion> relationshipSuggestions(String noteId, double threshold) {
-        getNote(noteId);
-        return similarity.suggest(noteId, state.knowledgeBase().keywordIndex(), threshold);
+        Note note = getNote(noteId);
+        if (threshold < 0 || threshold > 1 || !Double.isFinite(threshold)) {
+            throw new IllegalArgumentException("threshold must be between 0 and 1");
+        }
+        double minimum = Math.max(threshold, SUGGESTION_RELATIONSHIP_THRESHOLD);
+        return similarity.compare(note, state.knowledgeBase().keywordIndex(), candidateId ->
+                        state.knowledgeBase().findById(candidateId).orElse(null)).stream()
+                .filter(match -> match.similarity() >= minimum)
+                .map(match -> new SimilarityService.Suggestion(match.noteId(), match.similarity(), match.reason()))
+                .toList();
+    }
+
+    /** Add confident auto-links and retire only stale auto-links for an edited note. */
+    private List<NoteRelationship> updateAutomaticRelationships(Note note, boolean removeStale) {
+        List<SimilarityService.NoteMatch> matches = similarity.compare(note, state.knowledgeBase().keywordIndex(),
+                candidateId -> state.knowledgeBase().findById(candidateId).orElse(null));
+        Map<String, SimilarityService.NoteMatch> confidentByOtherId = matches.stream()
+                .filter(match -> match.confidence() == SimilarityService.Confidence.HIGH
+                        && match.similarity() >= AUTOMATIC_RELATIONSHIP_THRESHOLD)
+                .collect(Collectors.toMap(SimilarityService.NoteMatch::noteId, Function.identity()));
+
+        List<NoteRelationship> links = new ArrayList<>();
+        for (NoteRelationship relationship : state.data().relationships()) {
+            boolean incident = relationship.sourceNoteId().equals(note.id()) || relationship.targetNoteId().equals(note.id());
+            if (!removeStale || relationship.origin() != RelationshipOrigin.AUTOMATIC || !incident) {
+                links.add(relationship);
+                continue;
+            }
+
+            String otherId = relationship.sourceNoteId().equals(note.id())
+                    ? relationship.targetNoteId() : relationship.sourceNoteId();
+            SimilarityService.NoteMatch match = confidentByOtherId.get(otherId);
+            if (match != null) {
+                links.add(new NoteRelationship(relationship.id(), relationship.sourceNoteId(), relationship.targetNoteId(),
+                        relationship.type(), RelationshipOrigin.AUTOMATIC, match.similarity()));
+            }
+        }
+
+        Set<String> existingPairs = links.stream()
+                .map(link -> edgeKey(link.sourceNoteId(), link.targetNoteId()))
+                .collect(Collectors.toCollection(HashSet::new));
+        for (SimilarityService.NoteMatch match : confidentByOtherId.values()) {
+            String pair = edgeKey(note.id(), match.noteId());
+            if (!existingPairs.add(pair)) continue;
+            links.add(new NoteRelationship(UUID.randomUUID().toString(), note.id(), match.noteId(),
+                    RelationshipType.RELATED, RelationshipOrigin.AUTOMATIC, match.similarity()));
+        }
+        return List.copyOf(links);
     }
 
     public synchronized ConnectedComponentsService.Result connectedComponents() {

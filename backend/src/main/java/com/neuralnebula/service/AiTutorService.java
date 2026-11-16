@@ -3,7 +3,6 @@ package com.neuralnebula.service;
 import com.neuralnebula.ai.TutorModelGateway;
 import com.neuralnebula.api.dto.AiChatRequest;
 import com.neuralnebula.domain.Note;
-import com.neuralnebula.domain.NoteRelationship;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;

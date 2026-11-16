@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react'
+import { AiTutorChat } from './AiTutorChat'
+import type { AiTutorMessage } from '../types'
 import type { GalaxyCameraSnapshot, GraphNote, GraphRelationship } from '../types'
 import type { Point3 } from '../galaxy/layout'
 
@@ -79,7 +81,8 @@ export function Hud({ count, status, selected, connectionExplorationFocus, notes
   onFocusMode: () => void; onFullscreen: () => void; onSelectNote: (note: GraphNote) => void
   onExploreConnections: () => void; onExitConnectionExploration: () => void; onNavigate: (section: 'explore' | 'organize' | 'learn' | 'analyze') => void
 }) {
-  const [detailTab, setDetailTab] = useState<'overview' | 'related' | 'resources' | 'notes'>('overview')
+  const [detailTab, setDetailTab] = useState<'overview' | 'related' | 'resources' | 'notes' | 'ai-tutor'>('overview')
+  const [tutorChats, setTutorChats] = useState<Record<string, AiTutorMessage[]>>({})
   const [activeSection, setActiveSection] = useState<'explore' | 'organize' | 'learn' | 'analyze'>('explore')
   const statusText = { loading: 'Galaxy Online', ready: 'Galaxy Online', error: 'Signal unavailable' }[status]
   const categoryCounts = useMemo(() => {
@@ -166,11 +169,11 @@ export function Hud({ count, status, selected, connectionExplorationFocus, notes
 
     {selected && <aside className="note-panel" aria-live="polite" aria-label="Selected note details">
       <button className="note-close" type="button" aria-label="Close note details" onClick={onDeselect}>×</button>
-      <div className="note-preview" aria-hidden="true"><div className="note-preview-galaxy"><i/><i/><i/></div></div>
+      {detailTab !== 'ai-tutor' && <div className="note-preview" aria-hidden="true"><div className="note-preview-galaxy"><i/><i/><i/></div></div>}
       <h1>{selected.title}</h1>
       <div className={`panel-kicker category-label category-label--${selected.type.toLowerCase()}`}><span>{typeLabels[selected.type.toUpperCase()] ?? selected.type}</span><span>Importance: {selected.importance}/100</span></div>
       <nav className="detail-tabs" aria-label="Note detail sections">
-        {(['overview', 'related', 'resources', 'notes'] as const).map((tab) => <button type="button" key={tab} className={detailTab === tab ? 'is-active' : ''} onClick={() => setDetailTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</button>)}
+        {(['overview', 'related', 'resources', 'notes', 'ai-tutor'] as const).map((tab) => <button type="button" key={tab} className={detailTab === tab ? 'is-active' : ''} onClick={() => setDetailTab(tab)}>{tab === 'ai-tutor' ? 'AI Assistance' : tab[0].toUpperCase() + tab.slice(1)}</button>)}
       </nav>
       <div className="detail-content" key={detailTab}>
         {detailTab === 'overview' && <>
@@ -181,8 +184,10 @@ export function Hud({ count, status, selected, connectionExplorationFocus, notes
         {detailTab === 'related' && <div className="detail-note-list">{related.length ? related.slice(0, 8).map(({ noteId, similarity }) => { const note = noteMap.get(noteId); return note ? <button key={noteId} onClick={() => onSelectNote(note)}>{note.title}<small>{Math.round(similarity * 100)}% related</small></button> : null }) : <p className="note-content">No related concepts are available for this note.</p>}</div>}
         {detailTab === 'resources' && <div className="detail-note-list">{resources.length ? resources.map((note) => <button key={note.id} onClick={() => onSelectNote(note)}>{note.title}<small>Resource · connected note</small></button>) : <p className="note-content">No connected resources are available.</p>}</div>}
         {detailTab === 'notes' && <p className="note-content note-content--full">{selected.content || 'This note has no additional notes yet.'}</p>}
+        {detailTab === 'ai-tutor' && <AiTutorChat key={selected.id} note={selected} messages={tutorChats[selected.id] ?? []}
+          onMessagesChange={(messages) => setTutorChats((current) => ({ ...current, [selected.id]: messages }))} />}
       </div>
-      <button className="deselect-button explore-connections" onClick={onExploreConnections}><span aria-hidden="true">✧</span> Explore connections <span aria-hidden="true">→</span></button>
+      {detailTab !== 'ai-tutor' && <button className="deselect-button explore-connections" onClick={onExploreConnections}><span aria-hidden="true">✧</span> Explore connections <span aria-hidden="true">→</span></button>}
     </aside>}
 
     <footer className="interaction-hint"><span className="hint-cross">✣</span>Drag to orbit <i /> Scroll to zoom <i /> Select a node to inspect</footer>

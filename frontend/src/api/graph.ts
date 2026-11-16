@@ -1,6 +1,7 @@
 import type {
   CommunitiesResult, ComponentsResult, GraphNote, GraphPath, GraphRelationship, HistoryOperation,
   HistoryStatus, KnowledgeGraph, LearningOrder, Prerequisite, SearchSuggestions, SimilaritySuggestion, TraversalResult,
+  AiTutorMessage,
 } from '../types'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
@@ -96,6 +97,14 @@ function parseHistory(value: unknown): HistoryStatus {
 
 export async function fetchGraph(signal?: AbortSignal): Promise<KnowledgeGraph> {
   return parseGraph(await requestJson('/api/graph', { signal }))
+}
+
+export async function sendAiTutorMessage(noteId: string, message: string, history: AiTutorMessage[]): Promise<string> {
+  const data = requireRecord(await requestJson('/api/ai/chat', {
+    method: 'POST', body: JSON.stringify({ noteId, message, history: history.slice(-10) }),
+  }), 'AI Tutor response')
+  if (typeof data.answer !== 'string' || !data.answer.trim()) throw new Error('The AI Tutor returned an empty answer. Please try again.')
+  return data.answer
 }
 
 export async function searchNotes(query: string, signal?: AbortSignal): Promise<GraphNote[]> {

@@ -808,6 +808,35 @@
 }
 .app-shell .note-preview-galaxy { max-width: 48%; }
 .app-shell .note-panel .detail-tabs button { border-radius: 9px 9px 0 0; }
+
+/* Selected-note AI Tutor: contained within the existing details panel. */
+.detail-content:has(.ai-tutor) { display: flex; flex: 1 1 0; flex-direction: column; min-height: 0; overflow: hidden; }
+.ai-tutor { display: flex; flex: 1 1 0; flex-direction: column; width: 100%; min-width: 0; min-height: 0; overflow: hidden; color: #d9e1e5; }
+.ai-tutor-toolbar { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 0 0 9px; border-bottom: 1px solid rgba(184, 205, 215, .13); color: #9eabb1; font: 9px/1.4 'IBM Plex Mono', monospace; letter-spacing: .1em; }
+.ai-tutor-toolbar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-tutor-toolbar button,.ai-tutor-prompts button { border: 1px solid rgba(174, 198, 209, .2); border-radius: 12px; padding: 5px 8px; color: #c5d5dc; background: rgba(126, 160, 177, .07); font: 10px 'Playfair Display', Georgia, serif; cursor: pointer; }
+.ai-tutor-toolbar button:hover:not(:disabled),.ai-tutor-prompts button:hover:not(:disabled) { border-color: rgba(176, 222, 242, .46); color: #edf8fc; background: rgba(134, 180, 201, .13); }
+.ai-tutor button:focus-visible,.ai-tutor textarea:focus-visible { outline: 2px solid rgba(172, 219, 239, .75); outline-offset: 2px; }
+.ai-tutor button:disabled { cursor: default; opacity: .5; }
+.ai-tutor-messages { display: flex; flex: 1 1 0; flex-direction: column; gap: 10px; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 12px 5px 10px 0; overscroll-behavior: contain; scrollbar-color: rgba(153, 178, 188, .3) transparent; }
+.ai-tutor-message { max-width: 94%; border: 1px solid rgba(174, 198, 209, .12); border-radius: 12px; padding: 9px 10px; background: rgba(145, 164, 173, .055); }
+.ai-tutor-message--user { align-self: flex-end; border-color: rgba(164, 201, 218, .22); background: rgba(115, 157, 179, .13); }
+.ai-tutor-speaker { display: block; margin-bottom: 4px; color: #9fbac6; font: 8px 'IBM Plex Mono', monospace; letter-spacing: .09em; }
+.ai-tutor-message p { margin: 0; color: #d1dade; font: 12px/1.55 'Playfair Display', Georgia, serif; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-tutor-prompts { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 5px; max-height: 68px; overflow-y: auto; padding: 1px 2px 7px 0; scrollbar-color: rgba(153, 178, 188, .22) transparent; }
+.ai-tutor-prompts button { font-size: 9px; }
+.ai-tutor-typing { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; padding: 6px 8px; color: #aebdc4; font: 10px 'Playfair Display', Georgia, serif; }
+.ai-tutor-typing i { width: 4px; height: 4px; border-radius: 50%; background: #bddcec; animation: ai-tutor-pulse 1s ease-in-out infinite alternate; }
+.ai-tutor-typing i:nth-child(2) { animation-delay: .16s; }.ai-tutor-typing i:nth-child(3) { animation-delay: .32s; }.ai-tutor-typing span { margin-left: 4px; }
+@keyframes ai-tutor-pulse { to { opacity: .28; transform: translateY(-2px); } }
+.ai-tutor-error { flex: 0 0 auto; border-left: 2px solid #b9d9e8; padding: 6px 8px; color: #d8e5ea; background: rgba(117, 158, 177, .1); font: 10px/1.5 'Playfair Display', Georgia, serif; }
+.ai-tutor-composer { display: flex; flex: 0 0 auto; align-items: flex-end; gap: 7px; border: 1px solid rgba(174, 198, 209, .2); border-radius: 12px; padding: 6px; background: rgba(4, 8, 11, .72); }
+.ai-tutor-composer textarea { flex: 1 1 auto; min-width: 0; max-height: 90px; resize: vertical; border: 0; outline: 0; color: #e1e8eb; background: transparent; font: 12px/1.45 'Playfair Display', Georgia, serif; }
+.ai-tutor-composer textarea::placeholder { color: #78868d; }
+.ai-tutor-composer button { flex: 0 0 auto; border: 1px solid rgba(178, 212, 227, .3); border-radius: 10px; padding: 7px 9px; color: #e1edf2; background: rgba(131, 174, 194, .15); font: 11px 'Playfair Display', Georgia, serif; cursor: pointer; }
+.ai-tutor-composer button:hover:not(:disabled) { background: rgba(145, 194, 216, .25); }
+.ai-tutor-disclaimer { flex: 0 0 auto; padding-top: 6px; color: #849198; font: 9px/1.4 'Playfair Display', Georgia, serif; }
+@media (max-width: 650px) { .ai-tutor-message p { font-size: 11px; }.ai-tutor-prompts button { padding: 4px 6px; } }
 .app-shell .explorer-panel .console-row,
 .app-shell .explorer-panel .discovery-row > .console-row,
 .app-shell .explorer-panel .group-highlight,

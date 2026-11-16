@@ -11,6 +11,9 @@ export interface GraphNote {
   updatedAt?: string
 }
 
+export type AiTutorRole = 'USER' | 'ASSISTANT'
+export interface AiTutorMessage { role: AiTutorRole; content: string }
+
 export interface GraphRelationship {
   id: string
   sourceNoteId: string

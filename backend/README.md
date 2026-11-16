@@ -44,6 +44,22 @@ Mutations build and validate a candidate snapshot, write it to a temporary sibli
 | `GET /api/history` | Report undo/redo availability and next actions |
 | `POST /api/history/undo` | Persist and apply the most recent successful mutation in reverse |
 | `POST /api/history/redo` | Persist and reapply the most recently undone mutation |
+| `POST /api/ai/chat` | Generate a topic-aware tutor answer from a note ID, user message, and recent session history |
+
+## AI Assistance (NVIDIA NIM)
+
+The backend calls NVIDIA NIM's OpenAI-compatible chat-completions API. Add `NVIDIA_API_KEY` to the ignored `backend/.env` file (or the process environment). The default model is `nvidia/nemotron-3.5-bolt-e4b`; override it with `NVIDIA_MODEL` using a model slug available to your NVIDIA API key. The endpoint can be overridden with `NVIDIA_API_URL`; the request timeout defaults to 45 seconds (`AI_TUTOR_TIMEOUT_MILLIS`). If no key is configured, the backend still starts and `/api/ai/chat` returns `503 AI_TUTOR_NOT_CONFIGURED`. Provider failures return a safe, status-specific `502 AI_TUTOR_UNAVAILABLE` response without exposing credentials or raw provider diagnostics.
+
+The request contains `noteId`, `message`, and up to 10 recent `history` turns (the server trims longer histories). The backend derives the selected note and its direct relationships from canonical stored graph data. Conversations are held in browser session memory only and are never written to `knowledge.json`.
+
+Create `backend/.env` from `backend/.env.example`, then add your NVIDIA API key. Start Spring Boot from `backend/` so Spring loads this local file:
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and set NVIDIA_API_KEY to your key
+mvn spring-boot:run
+```
+Never add the key to frontend environment files or source control. `.env` files are excluded by the repository `.gitignore`.
 
 History covers successful note create/update/delete, ordinary relationship create/delete, and prerequisite create/delete operations. No-op note updates do not add history. A new successful mutation after undo clears the redo stack. Each history action is stored in memory and is cleared when the service restarts; the current JSON snapshot remains persisted. Persistence must succeed before a mutation or undo/redo operation is published in memory or its history stacks are changed. Empty undo/redo requests return an operation result with `applied: false`.
 

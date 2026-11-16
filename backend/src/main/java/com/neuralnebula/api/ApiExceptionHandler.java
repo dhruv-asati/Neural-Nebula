@@ -1,6 +1,8 @@
 package com.neuralnebula.api;
 
 import com.neuralnebula.api.dto.ErrorResponse;
+import com.neuralnebula.ai.AiTutorNotConfiguredException;
+import com.neuralnebula.ai.AiTutorUnavailableException;
 import com.neuralnebula.persistence.PersistenceException;
 import com.neuralnebula.service.ApiConflictException;
 import com.neuralnebula.service.ApiNotFoundException;
@@ -17,6 +19,16 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 @RestControllerAdvice
 public final class ApiExceptionHandler {
+    @ExceptionHandler(AiTutorNotConfiguredException.class)
+    public ResponseEntity<ErrorResponse> aiNotConfigured(AiTutorNotConfiguredException exception, HttpServletRequest request) {
+        return response(HttpStatus.SERVICE_UNAVAILABLE, "AI_TUTOR_NOT_CONFIGURED", exception.getMessage(), request);
+    }
+
+    @ExceptionHandler(AiTutorUnavailableException.class)
+    public ResponseEntity<ErrorResponse> aiUnavailable(AiTutorUnavailableException exception, HttpServletRequest request) {
+        return response(HttpStatus.BAD_GATEWAY, "AI_TUTOR_UNAVAILABLE", exception.getMessage(), request);
+    }
+
     @ExceptionHandler(ApiNotFoundException.class)
     public ResponseEntity<ErrorResponse> notFound(ApiNotFoundException exception, HttpServletRequest request) {
         return response(HttpStatus.NOT_FOUND, "NOT_FOUND", exception.getMessage(), request);
